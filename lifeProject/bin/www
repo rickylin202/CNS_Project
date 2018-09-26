@@ -1,0 +1,1018 @@
+#!/usr/bin/env node
+
+/**
+ * Module dependencies.
+ */
+
+var app = require('../app');
+var debug = require('debug')('lifeProject:server');
+var http = require('http');
+var https = require('https');
+var fs = require('fs');
+var parser = require('xml2js');
+var cronJob = require('cron').CronJob;
+var zlib = require('zlib');
+var db = require('./db');
+var xpath = require("xml2js-xpath");
+
+/**
+ * Initial database schema/model/entity
+ */
+var TrafficSchema = new db.Schema({
+  routeid:String,
+  locationpath:String,
+  startlocationpoint:String,
+  endlocationpoint:String,
+  roadsection:String,
+  roadtype:String,
+  fromkm:String,
+  tokm:String,
+  level:String,
+  value:String,
+  traveltime:String,
+  datacollecttime:String,
+  fromkm_Num:Number,
+  tokm_Num:Number
+});
+
+var AQISchema = new db.Schema({
+  SiteName:String,
+  County:String,
+  AQI:String,
+  Pollutant:String,
+  Status:String,
+  SO2:String,
+  CO:String,
+  CO_8hr:String,
+  O3:String,
+  O3_8hr:String,
+  PM10:String,
+  PM2_5:String,
+  NO2:String,
+  NOx:String,
+  NO:String,
+  WindSpeed:String,
+  WindDirec:String,
+  PublishTime:Date,
+  PM10_AVG:String,
+  PM2_5_AVG:String
+});
+
+var UVSchema = new db.Schema({
+    SiteName:String,
+    UVI:String,
+    AQI:String,
+    PublishAgency:String,
+    County:String,
+    WGS84Lon:String,
+    WGS84Lat:String,
+    PublishTime:String,
+});
+
+var trafficItem = db.model('trafficItem', TrafficSchema);
+var AQIData = db.model('AQIDB', AQISchema);
+var UVData = db.model('UVDB', UVSchema);
+
+/**
+ * Get port from environment and store in Express.
+ */
+
+var port = normalizePort(process.env.PORT || '3005');
+app.set('port', port);
+
+/**
+ * Create HTTP server.
+ */
+
+var server = http.createServer(app);
+
+/**
+ * Listen on provided port, on all network interfaces.
+ */
+
+server.listen(port);
+server.on('error', onError);
+server.on('listening', onListening);
+
+/**
+ * Normalize a port into a number, string, or false.
+ */
+
+function normalizePort(val) {
+  var port = parseInt(val, 10);
+
+  if (isNaN(port)) {
+    // named pipe
+    return val;
+  }
+
+  if (port >= 0) {
+    // port number
+    return port;
+  }
+
+  return false;
+}
+
+/**
+ * Event listener for HTTP server "error" event.
+ */
+
+function onError(error) {
+  if (error.syscall !== 'listen') {
+    throw error;
+  }
+
+  var bind = typeof port === 'string'
+    ? 'Pipe ' + port
+    : 'Port ' + port;
+
+  // handle specific listen errors with friendly messages
+  switch (error.code) {
+    case 'EACCES':
+      console.error(bind + ' requires elevated privileges');
+      process.exit(1);
+      break;
+    case 'EADDRINUSE':
+      console.error(bind + ' is already in use');
+      process.exit(1);
+      break;
+    default:
+      throw error;
+  }
+}
+
+/**
+ * Event listener for HTTP server "listening" event.
+ */
+
+function onListening() {
+  var addr = server.address();
+  var bind = typeof addr === 'string'
+    ? 'pipe ' + addr
+    : 'port ' + addr.port;
+  debug('Listening on ' + bind);
+}
+
+/**
+ * Cron data job for current weather.
+ */
+var currentWeatherOptions = {
+  host:'opendata.cwb.gov.tw',
+  path: '/opendataapi?dataid=O-A0003-001&authorizationkey=CWB-8D30AD53-7192-409C-9B40-2BCC53F79DB8'
+};
+
+function CurrentOpenDatacallback(response)
+{
+  var xml = '';
+  response.on('data', function(chunk) {
+    xml += chunk;
+  });
+  
+  response.on('end', function(chunk)
+  {
+    console.log("show the data : "+xml);
+
+    if (xml.search("File not found") == -1)
+    {
+      parser.parseString(xml, function(err, result)
+      {
+        var matches = xpath.find(result, "//location");
+        var result_data = JSON.stringify(matches);
+        var data_structure_change = false;
+
+        console.log("current length = "+matches.length);
+        console.log("current data = "+result_data);
+        
+        if (matches.length == 0)
+        {
+          data_structure_change = true;
+        }
+          
+        if ((result_data !== "") && (result_data !== "undefined") && (result_data !== "null") && (data_structure_change !== true))
+        {
+          fs.writeFile("./data/currentWeather.json", result_data, 'utf-8', function(err)
+          {
+            if (err)
+            {
+              console.log(err);
+            }
+            else
+            {
+              console.log("The current weather file was saved!");
+            }
+          });
+        }
+      });
+    }
+    else
+    {
+      console.log("The current weather file was not found!");
+    }
+  });
+}
+
+new cronJob('0 */5 * * * *', function ()
+{
+  http.request(currentWeatherOptions, CurrentOpenDatacallback).end();
+}, null, true, "Asia/Taipei");
+
+/**
+ * Cron data job for current weather2.
+ */
+var currentWeather2Options = {
+  host:'opendata.cwb.gov.tw',
+  path: '/opendataapi?dataid=O-A0001-001&authorizationkey=CWB-8D30AD53-7192-409C-9B40-2BCC53F79DB8'
+};
+
+function Current2OpenDatacallback(response)
+{
+  var xml = '';
+  response.on('data', function(chunk) {
+    xml += chunk;
+  });
+  
+  response.on('end', function(chunk)
+  {
+    console.log("show the data : "+xml);
+
+    if (xml.search("File not found") == -1)
+    {
+      parser.parseString(xml, function(err, result)
+      {
+        var matches = xpath.find(result, "//location");
+        var result_data = JSON.stringify(matches);
+        var data_structure_change = false;
+
+        console.log("current2 length = "+matches.length);
+        console.log("current2 data = "+result_data);
+        
+        if (matches.length == 0)
+        {
+          data_structure_change = true;
+        }
+          
+        if ((result_data !== "") && (result_data !== "undefined") && (result_data !== "null") && (data_structure_change !== true))
+        {
+          fs.writeFile("./data/currentWeather2.json", result_data, 'utf-8', function(err)
+          {
+            if (err)
+            {
+              console.log(err);
+            }
+            else
+            {
+              console.log("The current2 weather file was saved!");
+            }
+          });
+        }
+      });
+    }
+    else
+    {
+      console.log("The current2 weather file was not found!");
+    }
+  });
+}
+
+new cronJob('0 */10 * * * *', function ()
+{
+  http.request(currentWeather2Options, Current2OpenDatacallback).end();
+}, null, true, "Asia/Taipei");
+
+/**
+ * Cron data job for weather.
+ */
+var threeWeatherOptions = {
+  host:'opendata.cwb.gov.tw',
+  path: '/opendataapi?dataid=F-C0032-001&authorizationkey=CWB-8D30AD53-7192-409C-9B40-2BCC53F79DB8'
+};
+
+function ThreeOpenDatacallback(response)
+{
+  var xml = '';
+  response.on('data', function(chunk) {
+    xml += chunk;
+  });
+  
+  response.on('end', function(chunk)
+  {
+    console.log("show the data : "+xml);
+
+    if (xml.search("File not found") == -1)
+    {
+      parser.parseString(xml, function(err, result)
+      {
+        var matches = xpath.find(result, "//location");
+        var result_data = JSON.stringify(matches);
+        var data_structure_change = false;
+
+        console.log("threeDay length = "+matches.length);
+        console.log("threeDay data = "+result_data);
+        
+        if (matches.length == 0)
+        {
+          data_structure_change = true;
+        }
+        
+        if ((result_data !== "") && (result_data !== "undefined") && (result_data !== "null") && (data_structure_change !== true))
+        {
+          fs.writeFile("./data/threeDayWeather.json", result_data, 'utf-8', function(err)
+          {
+            if (err)
+            {
+              console.log(err);
+            }
+            else
+            {
+              console.log("The 36 hours weather file was saved!");
+            }
+          });
+        }
+      });
+    }
+    else
+    {
+      console.log("threeDayWeather File not found !!");
+    }
+  });
+}
+
+new cronJob('0 */10 * * * *', function ()
+{
+  http.request(threeWeatherOptions, ThreeOpenDatacallback).end();
+}, null, true, "Asia/Taipei");
+
+/**
+ * Cron data job for weather.
+ */
+var weekWeatherOptions = {
+  host:'opendata.cwb.gov.tw',
+  path: '/opendataapi?dataid=F-C0032-005&authorizationkey=CWB-8D30AD53-7192-409C-9B40-2BCC53F79DB8'
+};
+
+function WeekOpenDatacallback(response)
+{
+  var xml = '';
+  response.on('data', function(chunk) {
+    xml += chunk;
+  });
+  
+  response.on('end', function(chunk)
+  {
+    console.log("show the data : "+xml);
+    if (xml.search("File not found") == -1)
+    {
+      parser.parseString(xml, function(err, result)
+      {
+        var matches = xpath.find(result, "//location");
+        var result_data = JSON.stringify(matches);
+        var data_structure_change = false;
+
+        console.log("week length = "+matches.length);
+        console.log("week data = "+result_data);
+        
+        if (matches.length == 0)
+        {
+          data_structure_change = true;
+        }
+        
+        if ((result_data !== "") && (result_data !== "undefined") && (result_data !== "null") && (data_structure_change !== true))
+        {
+          fs.writeFile("./data/weekWeather.json", result_data, 'utf-8', function(err)
+          {
+            if (err)
+            {
+              console.log(err);
+            }
+            else
+            {
+              console.log("The week weather file was saved!");
+            }
+          });
+        }
+      });
+    }
+    else
+    {
+      console.log("weekWeather File not found !!");
+    }
+  });
+}
+
+new cronJob('0 */10 * * * *', function ()
+{
+  http.request(weekWeatherOptions, WeekOpenDatacallback).end();
+}, null, true, "Asia/Taipei");
+
+/**
+ * Cron data job for UV.
+ */
+var uvOptions = {
+  host:'opendata.epa.gov.tw',
+  path: '/webapi/api/rest/datastore/355000000I-000005/?format=json&token=9i0MYhHBEUyrTqtDRyIWOw'
+};
+
+function UVOpenDatacallback(response)
+{
+    var jsonData = '';
+    response.on('data', function(chunk) {
+      jsonData += chunk;
+    });
+    
+    response.on('end', function(chunk)
+    {
+      console.log("show the data : "+jsonData);
+      var json_UV = JSON.parse(jsonData);
+      if (json_UV.success == true)
+      {
+        console.log("show the UV length = "+json_UV.result.records.length);
+        
+        var siteName = "";
+        for (var i=0;i<json_UV.result.records.length;i++)
+        {
+            siteName = json_UV.result.records[i].SiteName;
+            UVData.findOneAndUpdate({SiteName:siteName}, json_UV.result.records[i], 
+                    {"new": true, "upsert":true, "returnNewDocument":true, "passRawResult": true}, 
+                    function (err, results, raw) {
+                      if (err)
+                      {
+                          console.log("UV db find data error : "+err);
+                      }
+                        
+                      if (raw.lastErrorObject.updatedExisting)
+                      {
+                        console.log('trace UV', results.SiteName, 'updated');
+                      }
+                      else
+                      {
+                        console.log('trace UV', results.SiteName, 'added');
+                      }
+                      //console.log("traffic db find value data docs length : "+results);
+                });
+        }
+      }
+    });
+}
+
+new cronJob('30 */10 * * * *', function ()
+{
+  http.request(uvOptions, UVOpenDatacallback).end();
+}, null, true, "Asia/Taipei");
+
+/**
+ * Cron data job for air.
+ */
+var airOptions = {
+  host:'opendata.epa.gov.tw',
+  path: '/ws/Data/REWXQA/?$orderby=SiteName&$skip=0&$top=1000&format=json'
+};
+
+function AirOpenDatacallback(response)
+{
+  var jsonData = '';
+  response.on('data', function(chunk) {
+    jsonData += chunk;
+  });
+  
+  response.on('end', function(chunk)
+  {
+    jsonData = jsonData.replace(/PM2.5/g, "PM2_5");
+    console.log("show the data : "+jsonData);
+    
+	if (jsonData.search("執行階段錯誤") === -1)
+    {
+      fs.writeFile("./data/air.json", jsonData, 'utf-8', function(err)
+      {
+        if (err)
+        {
+          console.log(err);
+        }
+        else
+        {
+          console.log("The air file was saved!");
+        }
+	  });
+	}
+  });
+}
+
+//new cronJob('0 */10 * * * *', function ()
+/*{
+  http.request(airOptions, AirOpenDatacallback).end();
+}, null, true, "Asia/Taipei");*/
+
+/**
+ * Cron data job for AQI.
+ */
+var AQIOptions = {
+  host:'opendata.epa.gov.tw',
+  path:'/webapi/api/rest/datastore/355000000I-000259/?format=json&token=9i0MYhHBEUyrTqtDRyIWOw'
+};
+
+function AQIOpenDatacallback(response)
+{
+  var jsonData = '';
+  response.on('data', function(chunk) {
+    jsonData += chunk;
+  });
+  
+  response.on('end', function(chunk)
+  {
+    jsonData = jsonData.replace(/PM2.5/g, "PM2_5");
+    console.log("show the data : "+jsonData);
+    var json_AQI = JSON.parse(jsonData);
+    if (json_AQI.success == true)
+    {
+      console.log("show the AQI length = "+json_AQI.result.records.length);
+      
+      var siteName = "";
+      for (var i=0;i<json_AQI.result.records.length;i++)
+      {
+          siteName = json_AQI.result.records[i].SiteName;
+          AQIData.findOneAndUpdate({SiteName:siteName}, json_AQI.result.records[i], 
+                  {"new": true, "upsert":true, "returnNewDocument":true, "passRawResult": true}, 
+                  function (err, results, raw) {
+                    if (err)
+                    {
+                        console.log("AQI db find data error : "+err);
+                    }
+                      
+                    if (raw.lastErrorObject.updatedExisting)
+                    {
+                      console.log('trace AQI', results.SiteName, 'updated');
+                    }
+                    else
+                    {
+                      console.log('trace AQI', results.SiteName, 'added');
+                    }
+                    //console.log("traffic db find value data docs length : "+results);
+              });
+      }
+    }
+  });
+}
+
+new cronJob('0 */10 * * * *', function ()
+{
+  http.request(AQIOptions, AQIOpenDatacallback).end();
+}, null, true, "Asia/Taipei");
+
+/**
+ * Cron data job for invApp.
+ */
+var invAppOptions = {
+        host:'api.einvoice.nat.gov.tw',
+        port: 443,
+        path:'',
+        method: 'GET'
+};
+
+var invAppTwoMonthAgoOptions = {
+        host:'api.einvoice.nat.gov.tw',
+        port: 443,
+        path:'',
+        method: 'GET'
+};
+
+var invAppFourMonthAgoOptions = {
+        host:'api.einvoice.nat.gov.tw',
+        port: 443,
+        path:'',
+        method: 'GET'
+};
+
+function invAppOpenDatacallback(response)
+{
+  var jsonData = '';
+  response.on('data', function(chunk) {
+    jsonData += chunk;
+  });
+  
+  response.on('end', function(chunk)
+  {
+    console.log("show the data : "+jsonData);
+    var now = new Date();
+    var InvFile = "";
+    var json_Inv = JSON.parse(jsonData);
+    
+    if (now.getMonth() > 1)
+    {
+      if (now.getMonth() > 9)
+      {
+        InvFile = (now.getFullYear() - 1911).toString() + (now.getMonth()).toString();
+      }
+      else
+      {
+        InvFile = (now.getFullYear() - 1911).toString() + "0" + (now.getMonth()).toString();
+      }
+    }
+    else
+    {
+      InvFile = (now.getFullYear() - 1912).toString() + "12";
+    }
+    
+	if ((json_Inv.code === "200") && (json_Inv.v === "0.2"))
+    {
+      fs.writeFile("./invApp/"+InvFile+".json", jsonData, 'utf-8', function(err)
+      {
+        if (err)
+        {
+          console.log(err);
+        }
+        else
+        {
+          console.log("The invApp file was saved!");
+        }
+	  });
+	}
+  });
+}
+
+function invAppTwoMonthAgoOpenDatacallback(response)
+{
+  var jsonData = '';
+  response.on('data', function(chunk) {
+    jsonData += chunk;
+  });
+  
+  response.on('end', function(chunk)
+  {
+    console.log("show the data : "+jsonData);
+    var now = new Date();
+    var InvFile = "";
+    var json_Inv = JSON.parse(jsonData);
+    
+    if ((now.getMonth() - 2) > 1)
+    {
+      InvFile = (now.getFullYear() - 1911).toString() + "0" + (now.getMonth()-2).toString();
+    }
+    else
+    {
+      InvFile = (now.getFullYear() - 1912).toString() + (12 + now.getMonth() - 2);
+    }
+    
+    if ((json_Inv.code === "200") && (json_Inv.v === "0.2"))
+    {
+      fs.writeFile("./invApp/"+InvFile+".json", jsonData, 'utf-8', function(err)
+      {
+        if (err)
+        {
+          console.log(err);
+        }
+        else
+        {
+          console.log("The invApp two months ago file was saved!");
+        }
+      });
+    }
+  });
+}
+
+function invAppFourMonthAgoOpenDatacallback(response)
+{
+  var jsonData = '';
+  response.on('data', function(chunk) {
+    jsonData += chunk;
+  });
+  
+  response.on('end', function(chunk)
+  {
+    console.log("show the data : "+jsonData);
+    var now = new Date();
+    var InvFile = "";
+    var json_Inv = JSON.parse(jsonData);
+    
+    if ((now.getMonth() - 4) > 1)
+    {
+      InvFile = (now.getFullYear() - 1911).toString() + "0" + (now.getMonth()-4).toString();
+    }
+    else
+    {
+      InvFile = ((12 + now.getMonth() - 4) > 9) ? (now.getFullYear() - 1912).toString() + (12 + now.getMonth() - 4) : (now.getFullYear() - 1912).toString() + "0" + (12 + now.getMonth() - 4);
+    }
+    
+    if ((json_Inv.code === "200") && (json_Inv.v === "0.2"))
+    {
+      fs.writeFile("./invApp/"+InvFile+".json", jsonData, 'utf-8', function(err)
+      {
+        if (err)
+        {
+          console.log(err);
+        }
+        else
+        {
+          console.log("The invApp four months ago file was saved!");
+        }
+      });
+    }
+  });
+}
+
+new cronJob('00 */30 * 25,26 0,2,4,6,8,10 *', function ()
+{
+  console.log("come in to search inv File");
+  var now = new Date();
+  var searchPath = "./invApp/";
+  var searchInvFile = "";
+  if (now.getMonth() > 1)
+  {
+    if (now.getMonth() >= 10)
+    {
+      searchInvFile = (now.getFullYear() - 1911).toString() + now.getMonth().toString();
+    }
+    else
+    {
+      searchInvFile = (now.getFullYear() - 1911).toString() + "0" + now.getMonth().toString();
+    }
+  }
+  else
+  {
+    searchInvFile = (now.getFullYear() - 1912).toString() + "12";
+  }
+
+  console.log("search inv file = "+searchInvFile);
+  invAppOptions.path = "/PB2CAPIVAN/invapp/InvApp?version=0.2&action=QryWinningList&invTerm="+searchInvFile+"&appID=EINV4201604298194&UUID=AFF147E4-5BB1-448E-B55D-0A834ADE3124";
+  fs.exists((searchPath + searchInvFile + ".json"), function(exists)
+  {
+    console.log("inv file esixts = "+exists);
+    if(exists === false)
+    {
+      https.request(invAppOptions, invAppOpenDatacallback).end();
+    }
+  });
+  
+  // check old data (two month ag0)
+  if ((now.getMonth() - 2) > 1)
+  {
+    searchInvFile = (now.getFullYear() - 1911).toString() + "0" + (now.getMonth()-2).toString();
+  }
+  else
+  {
+    searchInvFile = (now.getFullYear() - 1912).toString() + (12 + now.getMonth() - 2);
+  }
+  
+  console.log("search two months ago inv file = "+searchInvFile);
+  invAppTwoMonthAgoOptions.path = "/PB2CAPIVAN/invapp/InvApp?version=0.2&action=QryWinningList&invTerm="+searchInvFile+"&appID=EINV4201604298194&UUID=AFF147E4-5BB1-448E-B55D-0A834ADE3124";
+  fs.exists((searchPath + searchInvFile + ".json"), function(exists)
+  {
+    console.log("two months ago inv file esixts = "+exists);
+    if(exists === false)
+    {
+      https.request(invAppTwoMonthAgoOptions, invAppTwoMonthAgoOpenDatacallback).end();
+    }
+  });
+  
+  //check old data (four month ago)
+  if ((now.getMonth() - 4) > 1)
+  {
+    searchInvFile = (now.getFullYear() - 1911).toString() + "0" + (now.getMonth()-4).toString();
+  }
+  else
+  {
+    searchInvFile = ((12 + now.getMonth() - 4) > 9) ? (now.getFullYear() - 1912).toString() + (12 + now.getMonth() - 4) : (now.getFullYear() - 1912).toString() + "0" + (12 + now.getMonth() - 4);
+  }
+  
+  console.log("search four months ago inv file = "+searchInvFile);
+  invAppFourMonthAgoOptions.path = "/PB2CAPIVAN/invapp/InvApp?version=0.2&action=QryWinningList&invTerm="+searchInvFile+"&appID=EINV4201604298194&UUID=AFF147E4-5BB1-448E-B55D-0A834ADE3124";
+  fs.exists((searchPath + searchInvFile + ".json"), function(exists)
+  {
+    console.log("four months ago inv file esixts = "+exists);
+    if(exists === false)
+    {
+      https.request(invAppFourMonthAgoOptions, invAppFourMonthAgoOpenDatacallback).end();
+    }
+  });
+  
+  // check old data (six month ago)
+  if ((now.getMonth() - 6) > 1)
+  {
+    searchInvFile = (now.getFullYear() - 1911).toString() + "0" + (now.getMonth()-6).toString();
+  }
+  else
+  {
+    searchInvFile = ((12 + now.getMonth() - 6) > 9) ? (now.getFullYear() - 1912).toString() + (12 + now.getMonth() - 6) : (now.getFullYear() - 1912).toString() + "0" + (12 + now.getMonth() - 6);
+  }
+  
+  console.log("search six months ago inv file = "+searchInvFile);
+  fs.exists((searchPath + searchInvFile + ".json"), function(exists)
+  {
+    console.log("six months ago inv file esixts = "+exists);
+    if(exists === true)
+    {
+        fs.unlink((searchPath + searchInvFile + ".json"), function(err)
+        {
+          if (err) {
+              console.log(err);
+          }
+          console.log("File deleted successfully!");
+        });
+    }
+  });
+}, null, true, "Asia/Taipei");
+
+/**
+ * Cron data job for roadLevel_info.
+ */
+var roadLevelData = null;
+var roadLevel_infoOptions = {
+  host:'tisvcloud.freeway.gov.tw',
+  path: '/roadlevel_info.xml.gz',
+  headers: {
+      'Accept-Encoding': 'gzip'
+  }
+};
+function roadLevel_info_callback(response)
+{
+  var gunzipStream = zlib.createGunzip();
+  var write = fs.createWriteStream('./traffic/roadlevel_info.xml');
+  response.pipe(gunzipStream).pipe(write);
+}
+
+new cronJob('00 */10 * * * *', function ()
+{
+  http.get(roadLevel_infoOptions, roadLevel_info_callback).end();
+}, null, true, "Asia/Taipei");
+
+/**
+ * Cron data job for roadLevel_info.
+ */
+var roadLevel_oneMin_Data = null;
+var roadLevel_oneMin_Options = {
+  host:'tisvcloud.freeway.gov.tw',
+  path: '/roadlevel_value.xml.gz'
+};
+
+function roadLevel_oneMin_callback(response)
+{
+  var gunzipStream = zlib.createGunzip();
+  var write = fs.createWriteStream('./traffic/roadlevel_value.xml');
+  response.pipe(gunzipStream).pipe(write);
+}
+
+new cronJob('00 */05 * * * *', function ()
+{
+  http.get(roadLevel_oneMin_Options, roadLevel_oneMin_callback).end();
+}, null, true, "Asia/Taipei");
+
+/**
+ * Cron parse road Info from xml to json.
+ */
+new cronJob('30 */10 * * * *', function ()
+{
+    fs.readFile(("./traffic/roadlevel_info.xml"), function(err, fileData)
+    {
+      if (err)
+      {
+        console.log("traffic roadlevel_info error message: "+err);
+      }
+      //console.log("traffic roadLevel info xml format: "+fileData);
+      
+      parser.parseString(fileData, function(err, result)
+      {
+        // console.log("traffic roadLevel info json format: "+result);
+        var result_data = JSON.stringify(result);
+        // console.log("traffic roadLevel info string format: "+result_data);
+        if ((result_data !== "") && (result_data !== "undefined") && (result_data !== "null"))
+        {
+          fs.writeFile("./traffic/roadlevel_info.json", result_data, 'utf-8', function(err)
+          {
+            if (err)
+            {
+              console.log(err);
+            }
+            else
+            {
+              console.log("The traffic roadlevel_info file was saved!");
+            }
+            
+            // console.log("camcer length : "+result.XML_Head.Infos[0].Info.length);
+            var traffic_raw = result.XML_Head.Infos[0].Info;
+            var routeid = null;
+            var fromkm = 0, tokm = 0;
+            
+            for (var i=0;i<traffic_raw.length;i++)
+            {
+              routeid = traffic_raw[i].$.routeid;
+              fromkm = (traffic_raw[i].$.fromkm).substr(0, (traffic_raw[i].$.fromkm).search("K"));
+              tokm = (traffic_raw[i].$.tokm).substr(0, (traffic_raw[i].$.tokm).search("K"));
+              traffic_raw[i].$.fromkm_Num = parseInt(fromkm, 10);
+              traffic_raw[i].$.tokm_Num = parseInt(tokm, 10);
+              //console.log("routeid is"+" fromkm_Num : "+traffic_raw[i].$.fromkm_Num);
+              
+              if (routeid !== null)
+              {
+                  trafficItem.findOneAndUpdate({routeid: routeid}, traffic_raw[i].$, 
+                      {"new": true, "upsert":true, "returnNewDocument":true, "passRawResult": true}, 
+                      function (err, results, raw) {
+                        if (err)
+                        {
+                            console.log("traffic db find data error : "+err);
+                        }
+                          
+                        if (raw.lastErrorObject.updatedExisting)
+                        {
+                          console.log('trace', results.routeid, 'updated');
+                        }
+                        else
+                        {
+                          console.log('trace', results.routeid, 'added');
+                        }
+                        //console.log("traffic db find value data docs length : "+results);
+                  });
+              }
+            }
+          });
+        }
+      });
+    });
+}, null, true, "Asia/Taipei");
+
+function insertResult(err, docs)
+{
+    if (err) {
+        console.info('inser traffic data error is happened.', err);
+    } else {
+        console.info('%d potatoes were successfully stored.', docs.length);
+    }
+}
+
+/**
+ * Cron parse road Info from xml to json.
+ */
+new cronJob('30 */05 * * * *', function ()
+{
+    fs.readFile(("./traffic/roadlevel_value.xml"), function(err, fileData)
+    {
+      if (err)
+      {
+        console.log("traffic roadlevel_value error message: "+err);
+      }
+      // console.log("traffic roadLevel value xml format: "+fileData);
+      
+      parser.parseString(fileData, function(err, result)
+      {
+        // console.log("traffic roadLevel value json format: "+result);
+        var result_data = JSON.stringify(result);
+        // console.log("traffic roadLevel value string format: "+result_data);
+        if ((result_data !== "") && (result_data !== "undefined") && (result_data !== "null"))
+        {
+          fs.writeFile("./traffic/roadlevel_value.json", result_data, 'utf-8', function(err)
+          {
+            if (err)
+            {
+              console.log(err);
+            }
+            else
+            {
+              console.log("The traffic roadlevel_value json was saved!");
+            }
+            
+            // console.log("camcer length : "+result.XML_Head.Infos[0].Info.length);
+            var traffic_raw = result.XML_Head.Infos[0].Info;
+            var routeid = null;
+            
+            for (var i=0;i<traffic_raw.length;i++)
+            {
+              routeid = traffic_raw[i].$.routeid;
+              
+              if (routeid !== null)
+              {
+                  trafficItem.findOneAndUpdate({routeid:routeid}, traffic_raw[i].$, 
+                      {"new": true, "upsert":true, "returnNewDocument":true, "passRawResult": true}, 
+                      function (err, results, raw) {
+                        if (err)
+                        {
+                            console.log("traffic db find data error : "+err);
+                        }
+                          
+                        if (raw.lastErrorObject.updatedExisting)
+                        {
+                          console.log('trace', results.routeid, 'updated');
+                        }
+                        else
+                        {
+                          console.log('trace', results.routeid, 'added');
+                        }
+                        //console.log("traffic db find value data docs length : "+results);
+                  });
+              }
+            }
+          });
+        }
+      });
+    });
+}, null, true, "Asia/Taipei");
+/**
+ * Cron copy data for ben.
+ */
+// new cronJob('0 0 */1 * * *', function()
+/*{
+  console.log("backup weather data for ben!!");
+  var now = new Date();
+  var backupCurrentPath = "./benBackup/currentWeather_"+now.getTime()+".json";
+  var backupthreeDayWeatherPath = "./benBackup/threeDayWeather_"+now.getTime()+".json";
+
+  fs.createReadStream('./data/currentWeather.json').pipe(fs.createWriteStream(backupCurrentPath));
+  fs.createReadStream('./data/threeDayWeather.json').pipe(fs.createWriteStream(backupthreeDayWeatherPath));
+}, null, true, "Asia/Taipei");*/

@@ -1,0 +1,274 @@
+#!/usr/bin/env node
+
+/**
+ * Module dependencies.
+ */
+
+var app = require('../app');
+var debug = require('debug')('fet-doctor:server');
+var http = require('http');
+var cronJob = require('cron').CronJob;
+var db = require('./db');
+var url = require('url');
+var https = require('https');
+var util = require('util');
+var querystring = require('querystring');
+
+/**
+ * Initial database schema/model/entity
+ */
+var fetHealthSchema = new db.Schema({
+  account:String,
+  password:String,
+  nickname:String,
+  cellphone:String,
+  token:String,
+  stbLists:[{
+      stbno:String,
+      soid:String
+  }],
+  isNeedChangePWD:Boolean,
+  UpdateTime:Date
+});
+
+var fetHealthActList = db.model('fetHealthActList', fetHealthSchema);
+
+/**
+ * Get port from environment and store in Express.
+ */
+
+var port = normalizePort(process.env.PORT || '3000');
+app.set('port', port);
+
+/**
+ * Create HTTP server.
+ */
+
+var server = http.createServer(app);
+
+/**
+ * Listen on provided port, on all network interfaces.
+ */
+
+server.listen(port);
+server.on('error', onError);
+server.on('listening', onListening);
+
+/**
+ * Normalize a port into a number, string, or false.
+ */
+
+function normalizePort(val) {
+  var port = parseInt(val, 10);
+
+  if (isNaN(port)) {
+    // named pipe
+    return val;
+  }
+
+  if (port >= 0) {
+    // port number
+    return port;
+  }
+
+  return false;
+}
+
+/**
+ * Event listener for HTTP server "error" event.
+ */
+
+function onError(error) {
+  if (error.syscall !== 'listen') {
+    throw error;
+  }
+
+  var bind = typeof port === 'string'
+    ? 'Pipe ' + port
+    : 'Port ' + port;
+
+  // handle specific listen errors with friendly messages
+  switch (error.code) {
+    case 'EACCES':
+      console.error(bind + ' requires elevated privileges');
+      process.exit(1);
+      break;
+    case 'EADDRINUSE':
+      console.error(bind + ' is already in use');
+      process.exit(1);
+      break;
+    default:
+      throw error;
+  }
+}
+
+/**
+ * Event listener for HTTP server "listening" event.
+ */
+
+function onListening() {
+  var addr = server.address();
+  var bind = typeof addr === 'string'
+    ? 'pipe ' + addr
+    : 'port ' + addr.port;
+  debug('Listening on ' + bind);
+}
+
+/**
+ * Cron data job for update token.
+ */
+new cronJob('0 * * */2 * *', function ()
+{
+  //http.request(currentWeatherOptions, CurrentOpenDatacallback).end();
+    var now = new Date();
+    var updateCondition = new Date();
+    updateCondition.setMonth(updateCondition.getMonth() - 1);
+    fetHealthActList.find({UpdateTime:{"$lt":now}},
+    function (err, results) {
+        if (err)
+        {
+            console.log("fet health account db can't find data : "+err);
+        }
+        
+        console.log("results.length = "+results.length);
+        var FET_account_token_Options = null;
+        var urlstr = 'http://www.healthplus.tw/api/active.php?action=health4/login';
+        var bodyQueryStr = null;
+        var contentStr = "";
+        var urlData = url.parse(urlstr);
+        
+        for (var i=0;i<results.length;i++)
+        {
+            if (results[i].isNeedChangePWD == false)
+            {
+                fetHealthActList.findOne({account:results[i].account},
+                function (err, token_results) {
+                    if (err)
+                    {
+                        console.log("fet health account db can't find data : "+err);
+                    }
+                    
+                    console.log("account "+token_results.account+" should be update token.");
+                    bodyQueryStr = {"account":token_results.account, "password":token_results.password};
+                    contentStr = querystring.stringify(bodyQueryStr);
+                    
+                    //console.log("contentStr = "+contentStr);
+                    //console.log("host = "+urlData.hostname);
+                    //console.log("path = "+urlData.path);
+                    
+                    FET_account_token_Options = {
+                        host: urlData.hostname,
+                        path: urlData.path,
+                        method: 'POST',
+                        headers: {
+                            'Content-Type': 'application/x-www-form-urlencoded',
+                            'Content-Length': Buffer.byteLength(contentStr, 'utf8')
+                        }
+                    };
+                    
+                    var post_req = http.request(FET_account_token_Options, function (response)
+                    {
+                        var account_login = '';
+                        response.setEncoding('utf8');
+                        response.on('data', function (chunk) {
+                            console.log('Response: ' + chunk);
+                            account_login += chunk;
+                        });
+                        response.on('end', function(chunk)
+                        {
+                            var account_json = null;
+                            var token = null;
+                            var now = new Date();
+                            try
+                            {
+                                account_json = JSON.parse(account_login);
+                            }
+                            catch (e)
+                            {
+                                console.log("error message : "+e);
+                                return;
+                            }
+                            
+                            //var content_json = querystring.parse(FET_account_token_Options);
+                            //var cookie_json = querystring.parse(response.cookie);
+                            
+                            //console.log("content_json.account = "+content_json.account);
+                            
+                            saveTokenStatus(token_results.account, account_json);
+                            
+                            
+                        });
+                    });
+                    // post the data
+                    post_req.write(contentStr);
+                    post_req.end();
+                    
+                    
+                });
+                
+            }
+        }
+    });
+}, null, true, "Asia/Taipei");
+
+function saveTokenStatus(account, account_json)
+{
+    //var content_json = querystring.parse(contentStr);
+    var content_json = {account:account};
+    var now = new Date();
+    console.log("contentStr = "+content_json.account);
+    if (account_json.message  == "OK")
+    {
+        //results[i].token = account_json.data.t;
+        //results[i].UpdateTime = now.toUTCString();
+        console.log("token = "+account_json.data.t);
+        fetHealthActList.findOne({account:content_json.account},
+        function (err, token_results) {
+            if (err)
+            {
+                console.log("fet health account db can't find data : "+err);
+            }
+            
+            token_results.token = account_json.data.t;
+            token_results.UpdateTime = now.toUTCString();
+            token_results.isNeedChangePWD = false;
+            token_results.save(function (err) {
+                if(err)
+                {
+                    console.error('update account Data ERROR!');
+                }
+                
+                console.log('update account Data OK');
+            });
+            
+        });
+    }
+    else
+    {
+        //results[i].UpdateTime = now.toUTCString();
+        //results[i].isNeedChangePWD = true;
+        console.log("message = "+account_json.message);
+
+        if ((account_json.err_code === "101") || (account_json.err_code === "005"))
+        {
+            fetHealthActList.findOne({account:content_json.account},
+                function (err, fail_results) {
+                    if (err)
+                    {
+                        console.log("fet health account db can't find data : "+err);
+                    }
+
+                    fail_results.UpdateTime = now.toUTCString();
+                    fail_results.isNeedChangePWD = true;
+                    fail_results.save(function (err) {
+                        if(err)
+                        {
+                            console.error('update account Data ERROR!');
+                        }
+
+                        console.log('update account Data OK');
+                    });
+                });
+        }
+    }
+}

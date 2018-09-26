@@ -1,0 +1,3037 @@
+#!/usr/bin/env node
+
+/**
+ * Module dependencies.
+ */
+
+var app = require('../app');
+var debug = require('debug')('busStation:server');
+var http = require('http');
+var https = require('https');
+var request = require('request');
+var parser = require('xml2js');
+var fs = require('fs');
+var cronJob = require('cron').CronJob;
+var db = require('./db');
+
+/**
+ * Initial database schema/model/entity
+ */
+var busRouteSchema = new db.Schema({
+  RouteUID:String,
+  RouteID:String,
+  OperatorIDs:String,
+  SubRoutes:[{
+      SubRouteUID:String,
+      SubRouteID:String,
+      OperatorIDs:[String],
+      SubRouteName:{Zh_tw:String,En:String},
+      Direction:Number,
+      FirstBusTime:String,
+      LastBusTime:String,
+      HolidayFirstBusTime:String,
+      HolidayLastBusTime:String
+  }],
+  BusRouteType:Number,
+  RouteName:{Zh_tw:String,En:String},
+  DepartureStopNameZh:String,
+  DepartureStopNameEn:String,
+  DestinationStopNameZh:String,
+  DestinationStopNameEn:String,
+  TicketPriceDescriptionZh:String,
+  TicketPriceDescriptionEn:String,
+  FareBufferZoneDescriptionZh:String,
+  FareBufferZoneDescriptionEn:String,
+  RouteMapImageUrl:String,
+  Location:String,
+  UpdateTime:Date
+});
+
+var busStopStationSchema = new db.Schema({
+    RouteUID:String,
+    RouteID:String,
+    RouteName:{Zh_tw:String,En:String},
+    KeyPattern:Boolean,
+    SubRouteUID:String,
+    SubRouteID:String,
+    SubRouteName:{Zh_tw:String,En:String},
+    Direction:Number,
+    Stops:[{
+        StopUID:String,
+        StopID:String,
+        StopName:{Zh_tw:String,En:String},
+        StopBoarding:String,
+        StopSequence:Number,
+        StopPosition:{PositionLat:Number,PositionLon:Number}
+    }],
+    Location:String,
+    UpdateTime:Date
+});
+
+var busN1EstimateTimeSchema = new db.Schema({
+    PlateNumb:String,
+    StopUID:String,
+    StopID:String,
+    StopName:{Zh_tw:String,En:String},
+    RouteUID:String,
+    RouteID:String,
+    RouteName:{Zh_tw:String,En:String},
+    Direction:Number,
+    EstimateTime:Number,
+    StopCountDown:Number,
+    CurrentStop:String,
+    DestinationStop:String,
+    StopStatus:Number,
+    MessageType:Number,
+    NextBusTime:String,
+    IsLastBus:Boolean,
+    TransTime:Date,
+    SrcRecTime:Date,
+    SrcUpdateTime:Date,
+    UpdateTime:Date
+});
+
+var busA2RealTimeNearStopSchema = new db.Schema({
+    PlateNumb:String,
+    OperatorID:String,
+    RouteUID:String,
+    RouteID:String,
+    RouteName:{Zh_tw:String,En:String},
+    SubRouteName:{Zh_tw:String,En:String},
+    Direction:Number,
+    StopUID:String,
+    StopID:String,
+    StopName:{Zh_tw:String,En:String},
+    MessageType:String,
+    DutyStatus:String,
+    BusStatus:String,
+    A2EventType:String,
+    StopCountDown:Number,
+    GPSTime:Date,
+    TransTime:Date,
+    SrcRecTime:Date,
+    SrcUpdateTime:Date,
+    UpdateTime:Date
+});
+
+var favoriteBusListSchema = new db.Schema({
+    STBID:String,
+    BusList:[{
+        StopUID:String,
+        StopName:{Zh_tw:String,En:String},
+        RouteUID:String,
+        RouteName:{Zh_tw:String,En:String},
+        Direction:Number,
+        Type:Number
+    }]
+});
+
+var CityBusEstimateTimeSchema = new db.Schema({
+    StopID:String,
+    Location:String,
+    likeNumber: {type: Number, min: 0, default: 1}
+})
+
+var CityRouteEstimateTimeSchema = new db.Schema({
+    RouteUID:String,
+    Location:String,
+    likeNumber: {type: Number, min: 0, default: 1}
+})
+
+var routerList = db.model('routerList', busRouteSchema);
+var routerStopList = db.model('routerStopList', busStopStationSchema);
+var favoriteBusList = db.model('favoriteBusList', favoriteBusListSchema);
+
+var cityRouteEstimateTimeList = db.model('cityRouteEstimateTimeList', CityRouteEstimateTimeSchema);
+var busEstimateTime = db.model('busEstimateTime', busN1EstimateTimeSchema);
+var busRealTimeNearStop = db.model('busRealTimeNearStop', busA2RealTimeNearStopSchema);
+//var cityBusEstimateTimeList = db.model('cityBusEstimateTimeList', CityBusEstimateTimeSchema);
+/**
+ * Get port from environment and store in Express.
+ */
+
+var port = normalizePort(process.env.PORT || '3015');
+app.set('port', port);
+
+/**
+ * Create HTTP server.
+ */
+
+var server = http.createServer(app);
+
+/**
+ * Listen on provided port, on all network interfaces.
+ */
+
+server.listen(port);
+server.on('error', onError);
+server.on('listening', onListening);
+
+/**
+ * Normalize a port into a number, string, or false.
+ */
+
+function normalizePort(val) {
+  var port = parseInt(val, 10);
+
+  if (isNaN(port)) {
+    // named pipe
+    return val;
+  }
+
+  if (port >= 0) {
+    // port number
+    return port;
+  }
+
+  return false;
+}
+
+/**
+ * Event listener for HTTP server "error" event.
+ */
+
+function onError(error) {
+  if (error.syscall !== 'listen') {
+    throw error;
+  }
+
+  var bind = typeof port === 'string'
+    ? 'Pipe ' + port
+    : 'Port ' + port;
+
+  // handle specific listen errors with friendly messages
+  switch (error.code) {
+    case 'EACCES':
+      console.error(bind + ' requires elevated privileges');
+      process.exit(1);
+      break;
+    case 'EADDRINUSE':
+      console.error(bind + ' is already in use');
+      process.exit(1);
+      break;
+    default:
+      throw error;
+  }
+}
+
+/**
+ * Event listener for HTTP server "listening" event.
+ */
+
+function onListening() {
+  var addr = server.address();
+  var bind = typeof addr === 'string'
+    ? 'pipe ' + addr
+    : 'port ' + addr.port;
+  debug('Listening on ' + bind);
+}
+
+// ptx get Ticket
+var ptxTicketOptions = {
+  host:'ptx.transportdata.tw',
+  path: '/MOTC/v2/Account/Login?UserData.account=ricky202&UserData.password=Nkhymsjhwp2%402&%24format=JSON'
+};
+var ptxTicket = "";
+
+function ptxTicket_callback(response)
+{
+ 
+  var jsonData = '';
+  response.on('error', function (e) {
+      console.log("problem with request: ", e);
+  });
+  
+  response.on('data', function(chunk) {
+    jsonData += chunk;
+  });
+  
+  response.on('end', function(chunk)
+  {
+    var ptxTicket_data = null;
+    try
+    {
+        ptxTicket_data = JSON.parse(jsonData);
+    }
+    catch (e)
+    {
+        console.log("show the ticket data : "+jsonData);
+        console.log("error message : "+e);
+        return;
+    }
+   
+    if (ptxTicket_data.Status === true)
+    {
+      ptxTicket = ptxTicket_data.Ticket;
+      console.log("The ptx Ticket data = "+ptxTicket);
+      fs.writeFile("./data/ptxTicket.json", jsonData, 'utf-8', function(err)
+      {
+        if (err)
+        {
+          console.log(err);
+        }
+        else
+        {
+          console.log("The ptx Ticket file was saved!");
+        }
+      });
+    }
+  });
+}
+
+//new cronJob('00 */30 * * * *', function ()
+/*{
+  https.get(ptxTicketOptions, ptxTicket_callback).end();
+}, null, true, "Asia/Taipei");*/
+
+/*
+ * Taipei bus route and stop information maintain area
+ */
+
+// Taipei route index
+var router_list_Taipei_Index = 0;
+var router_stop_Taipei_Index = 0;
+var bus_Estimate_Time_Taipei_Index = 0;
+var bus_RealTime_Stop_Taipei_Index = 0;
+var Taipei_total_Favor = 0;
+
+// ptx update Taipei router database
+function TaipeiRouterGet_callback(response)
+{ 
+  var routerData = '';
+  
+  response.on('error', function (e) {
+      console.log("TaipeiRouter problem with request: ", e);
+  });
+  
+  response.on('data', function(chunk) {
+      routerData += chunk;
+  });
+  
+  response.on('end', function(chunk)
+  {
+    // console.log("show the Taipei router data : "+routerData);
+
+    var router_data = null;
+    try
+    {
+        router_data = JSON.parse(routerData);
+    }
+    catch (e)
+    {
+        console.log("show the Taipei router data : "+routerData);
+        console.log("router data parse error : "+e);
+        return;
+    }
+
+    if (router_data.status == false)
+    {
+        console.log("router data status is false!!!!");
+        https.get(ptxTicketOptions, ptxTicket_callback).end();
+    }
+    
+    if (router_data.length == 10)
+    {
+        router_list_Taipei_Index++;
+        // console.log("router_list_Taipei_Index : "+router_list_Taipei_Index);
+        var router_list_Taipei_Options = {
+                host:'ptx.transportdata.tw',
+                path: '/MOTC/v2/Bus/Route/City/Taipei/?ticket='+ptxTicket+'&%24top=10&%24skip='+(router_list_Taipei_Index * 10)+'&%24format=JSON'
+            };
+
+        http.get(router_list_Taipei_Options, TaipeiRouterGet_callback).end();
+    }
+    else
+    {
+        router_list_Taipei_Index = 0;
+    }
+    
+    for (var i=0;i<router_data.length;i++)
+    {
+      if (router_data[i].RouteUID !== "")
+      {
+          var routeid = router_data[i].RouteUID;
+          router_data[i].Location = 'Taipei';
+          routerList.findOneAndUpdate({RouteUID: routeid}, router_data[i], 
+          {"new": true, "upsert":true, "returnNewDocument":true, "passRawResult": true}, 
+          function (err, results, raw) {
+            if (err)
+            {
+                console.log("traffic db find data error : "+err);
+            }
+              
+            /*if (raw.lastErrorObject.updatedExisting)
+            {
+              console.log('trace TaipeiRouter = ', results.RouteUID, 'updated');
+            }
+            else
+            {
+              console.log('trace TaipeiRouter = ', results.RouteUID, 'added');
+            }*/
+      });
+      }
+    }
+  });
+}
+
+// new cronJob('00 */30 1,2,3,4,5 * * *', function ()
+/*{
+    router_list_Taipei_Index = 0;
+    var router_list_Taipei_Options = {
+        host:'ptx.transportdata.tw',
+        path: '/MOTC/v2/Bus/Route/City/Taipei/?ticket='+ptxTicket+'&%24top=10&%24skip='+(router_list_Taipei_Index * 10)+'&%24format=JSON'
+    };
+
+    http.get(router_list_Taipei_Options, TaipeiRouterGet_callback).end();
+    
+}, null, true, "Asia/Taipei");*/
+
+
+//ptx update Taipei route stop station database
+function TaipeiRouterStopGet_callback(response)
+{ 
+  var routerData = '';
+  
+  response.on('error', function (e) {
+      console.log("TaipeiRouterStop problem with request: ", e);
+  });
+  
+  response.on('data', function(chunk) {
+      routerData += chunk;
+  });
+  
+  response.on('end', function(chunk)
+  {
+    // console.log("show the Taipei router stop data : "+routerData);
+    
+    var router_data = null;
+    try
+    {
+        router_data = JSON.parse(routerData);
+    }
+    catch (e)
+    {
+        console.log("show the Taipei router stop data : "+routerData);
+        console.log("router stop data parse error : "+e);
+        return;
+    }
+    
+    if (router_data.status == false)
+    {
+        console.log("router data status is false!!!!");
+        https.get(ptxTicketOptions, ptxTicket_callback).end();
+    }
+    
+    if (router_data.length == 10)
+    {
+        router_stop_Taipei_Index++;
+        // console.log("router_stop_Taipei_Index : "+router_stop_Taipei_Index);
+        var router_stop_Taipei_Options = {
+                host:'ptx.transportdata.tw',
+                path: '/MOTC/v2/Bus/StopOfRoute/City/Taipei/?ticket='+ptxTicket+'&%24top=10&%24skip='+(router_stop_Taipei_Index * 10)+'&%24format=JSON'
+            };
+
+        http.get(router_stop_Taipei_Options, TaipeiRouterStopGet_callback).end();
+    }
+    else
+    {
+        router_stop_Taipei_Index = 0;
+    }
+    
+    for (var i=0;i<router_data.length;i++)
+    {
+      if (router_data[i].RouteUID !== "")
+      {
+          var routeid = router_data[i].RouteUID;
+          var direction = router_data[i].Direction;
+          router_data[i].Location = 'Taipei';
+          //console.log('show the stops data = '+router_data[i]);
+          //console.log('show the stops number = '+router_data[i].Stops.length);
+          routerStopList.findOneAndUpdate({RouteUID: routeid, Direction: direction}, router_data[i], 
+          {"new": true, "upsert":true, "returnNewDocument":true, "passRawResult": true}, 
+          function (err, results, raw) {
+            if (err)
+            {
+                console.log("traffic db find data error : "+err);
+            }
+              
+            /*if (raw.lastErrorObject.updatedExisting)
+            {
+              console.log('trace TaipeiRouterStop = ', results.RouteUID, 'updated');
+            }
+            else
+            {
+              console.log('trace TaipeiRouterStop = ', results.RouteUID, 'added');
+            }*/
+      });
+      }
+    }
+  });
+}
+
+//new cronJob('30 */30 1,2,3,4,5 * * *', function ()
+/*{
+    router_stop_Taipei_Index = 0;
+    var router_stop_Taipei_Options = {
+        host:'ptx.transportdata.tw',
+        path: '/MOTC/v2/Bus/StopOfRoute/City/Taipei/?ticket='+ptxTicket+'&%24top=10&%24skip='+(router_stop_Taipei_Index * 10)+'&%24format=JSON'
+    };
+
+    http.get(router_stop_Taipei_Options, TaipeiRouterStopGet_callback).end();
+    
+}, null, true, "Asia/Taipei");*/
+
+
+//ptx update Taipei N1 API database
+function TaipeiN1APIGet_callback(response)
+{ 
+  var routerData = '';
+  
+  response.on('error', function (e) {
+      console.log("TaipeiN1 problem with request: ", e);
+  });
+  
+  response.on('data', function(chunk) {
+      routerData += chunk;
+  });
+  
+  response.on('end', function(chunk)
+  {
+    //console.log("show the Taipei N1 API data : "+routerData);
+    var router_data = null;
+    try
+    {
+        router_data = JSON.parse(routerData);
+    }
+    catch (e)
+    {
+        console.log("show the Taipei N1 API data : "+routerData);
+        console.log("error message : "+e);
+        return;
+    }
+    
+    if (router_data.status == false)
+    {
+        console.log("router data status is false!!!!");
+        https.get(ptxTicketOptions, ptxTicket_callback).end();
+    }
+    
+    for (var i=0;i<router_data.length;i++)
+    {
+      if (router_data[i].StopUID !== "")
+      {
+          var stopuid = router_data[i].StopUID;
+          
+          if (router_data[i].EstimateTime == undefined)
+          {
+              router_data[i].EstimateTime = -1;
+          }
+          
+          if (router_data[i].StopStatus == undefined)
+          {
+              router_data[i].StopStatus = 0;
+          }
+          
+          busEstimateTime.findOneAndUpdate({StopUID: stopuid}, router_data[i], 
+          {"new": true, "upsert":true, "returnNewDocument":true, "passRawResult": true}, 
+          function (err, results, raw) {
+            if (err)
+            {
+                console.log("TaipeiN1API db find data error : "+err);
+            }
+              
+            /*if (raw.lastErrorObject.updatedExisting)
+            {
+              console.log('trace TaipeiN1API = ', results.StopUID, 'updated');
+            }
+            else
+            {
+              console.log('trace TaipeiN1API = ', results.StopUID, 'added');
+            }*/
+          });
+      }
+    }
+  });
+}
+
+//new cronJob('*/30 * * * * *', function ()
+/*{
+    if (bus_Estimate_Time_Taipei_Index == 0)
+    {
+    cityRouteEstimateTimeList.find({Location:"Taipei"},
+    function (err, docs) {
+        if (err)
+        {
+            console.log("stop id find data error : "+err);
+        }
+          
+        Taipei_total_Favor = docs.length;
+        // console.log('Taipei_total_Favor length = ', Taipei_total_Favor);
+        console.log('cronJob bus_Estimate_Time_Taipei_Index =', bus_Estimate_Time_Taipei_Index);
+        if (docs.length < 10)
+        {
+            for (var i=0;i<docs.length;i++)
+            {
+                // console.log('docs '+ i +' = ', docs[i].RouteUID);
+                
+                if ((docs[i].RouteUID != null) && (docs[i].likeNumber > 0))
+                {
+                    var bus_Estimate_Time_Taipei_Options = {
+                            host:'ptx.transportdata.tw',
+                            path: '/MOTC/v2/Bus/EstimatedTimeOfArrival/City/Taipei?ticket='+ptxTicket+'&%24filter=RouteUID%20eq%20\u0027'+docs[i].RouteUID+'\u0027&%24format=JSON'
+                        };
+                    http.get(bus_Estimate_Time_Taipei_Options, TaipeiN1APIGet_callback).end();
+                }
+            }
+        }
+        else
+        {
+            var searchIndex = bus_Estimate_Time_Taipei_Index * 10;
+            for (var i=searchIndex;i<(searchIndex+10);i++)
+            {
+                if ((docs[i].RouteUID != null) && (docs[i].likeNumber > 0))
+                {
+                    // sconsole.log('docs '+ i +' = ', docs[i].RouteUID);
+                    var bus_Estimate_Time_Taipei_Options = {
+                            host:'ptx.transportdata.tw',
+                            path: '/MOTC/v2/Bus/EstimatedTimeOfArrival/City/Taipei?ticket='+ptxTicket+'&%24filter=RouteUID%20eq%20\u0027'+docs[i].RouteUID+'\u0027&%24format=JSON'
+                        };
+                    http.get(bus_Estimate_Time_Taipei_Options, TaipeiN1APIGet_callback).end();
+                }
+            }
+            bus_Estimate_Time_Taipei_Index++;
+            setTimeout(updateTaipeiBusEstimateTime, 1000, docs);
+        }
+    });
+    }
+}, null, true, "Asia/Taipei");*/
+
+function updateTaipeiBusEstimateTime(docs)
+{
+    var searchIndex = bus_Estimate_Time_Taipei_Index * 10;
+    var endIndex = searchIndex + 10;
+    if (endIndex > Taipei_total_Favor)
+    {
+        endIndex = Taipei_total_Favor;
+    }
+    console.log('updateTaipei bus_Estimate_Time_Taipei_Index =', bus_Estimate_Time_Taipei_Index);
+    for (var i=searchIndex;i<endIndex;i++)
+    {
+        // console.log('docs '+ i +' = ', docs[i].RouteUID);
+
+        if ((docs[i].RouteUID != null) && (docs[i].likeNumber > 0))
+        {
+            var bus_Estimate_Time_Taipei_Options = {
+                    host:'ptx.transportdata.tw',
+                    path: '/MOTC/v2/Bus/EstimatedTimeOfArrival/City/Taipei?ticket='+ptxTicket+'&%24filter=RouteUID%20eq%20\u0027'+docs[i].RouteUID+'\u0027&%24format=JSON'
+                };
+            http.get(bus_Estimate_Time_Taipei_Options, TaipeiN1APIGet_callback).end();
+        }
+    }
+    
+    if (Taipei_total_Favor > endIndex)
+    {
+        bus_Estimate_Time_Taipei_Index++;
+        setTimeout(updateTaipeiBusEstimateTime, 1000, docs);
+    }
+    else
+    {
+        bus_Estimate_Time_Taipei_Index = 0;
+    }
+}
+
+
+/*
+ * New Taipei bus route and stop information maintain area
+ */
+
+// New New Taipei route index
+var router_list_NewTaipei_Index = 0;
+var router_stop_NewTaipei_Index = 0;
+var bus_Estimate_Time_NewTaipei_Index = 0;
+var bus_RealTime_Stop_NewTaipei_Index = 0;
+var NewTaipei_total_Favor = 0;
+
+// ptx update New Taipei router database
+function NewTaipeiRouterGet_callback(response)
+{ 
+  var routerData = '';
+  
+  response.on('error', function (e) {
+      console.log("NewTaipei Router problem with request: ", e);
+  });
+  
+  response.on('data', function(chunk) {
+      routerData += chunk;
+  });
+  
+  response.on('end', function(chunk)
+  {
+    // console.log("show the New Taipei router data : "+routerData);
+
+    var router_data = null;
+    try
+    {
+        router_data = JSON.parse(routerData);
+    }
+    catch (e)
+    {
+        console.log("show the New Taipei router data : "+routerData);
+        console.log("router data parse error : "+e);
+        return;
+    }
+
+   
+    if (router_data.length == 10)
+    {
+        router_list_NewTaipei_Index++;
+        // console.log("router_list_NewTaipei_Index : "+router_list_NewTaipei_Index);
+        var router_list_NewTaipei_Options = {
+                host:'ptx.transportdata.tw',
+                path: '/MOTC/v2/Bus/Route/City/NewTaipei/?ticket='+ptxTicket+'&%24top=10&%24skip='+(router_list_NewTaipei_Index * 10)+'&%24format=JSON'
+            };
+
+        http.get(router_list_NewTaipei_Options, NewTaipeiRouterGet_callback).end();
+    }
+    else
+    {
+        router_list_NewTaipei_Index = 0;
+    }
+    
+    for (var i=0;i<router_data.length;i++)
+    {
+      if (router_data[i].RouteUID !== "")
+      {
+          var routeid = router_data[i].RouteUID;
+          router_data[i].Location = 'NewTaipei';
+          routerList.findOneAndUpdate({RouteUID: routeid}, router_data[i], 
+          {"new": true, "upsert":true, "returnNewDocument":true, "passRawResult": true}, 
+          function (err, results, raw) {
+            if (err)
+            {
+                console.log("bus db find data error : "+err);
+            }
+              
+            /*if (raw.lastErrorObject.updatedExisting)
+            {
+              console.log('trace NewTaipei Router = ', results.RouteUID, 'updated');
+            }
+            else
+            {
+              console.log('trace NewTaipei Router = ', results.RouteUID, 'added');
+            }*/
+      });
+      }
+    }
+  });
+}
+
+//new cronJob('00 */30 1,2,3,4,5 * * *', function ()
+/*{
+    router_list_NewTaipei_Index = 0;
+    var router_list_NewTaipei_Options = {
+        host:'ptx.transportdata.tw',
+        path: '/MOTC/v2/Bus/Route/City/NewTaipei/?ticket='+ptxTicket+'&%24top=10&%24skip='+(router_list_NewTaipei_Index * 10)+'&%24format=JSON'
+    };
+
+    http.get(router_list_NewTaipei_Options, NewTaipeiRouterGet_callback).end();
+    
+}, null, true, "Asia/Taipei");*/
+
+
+//ptx update New Taipei route stop station database
+function NewTaipeiRouterStopGet_callback(response)
+{ 
+  var routerData = '';
+  
+  response.on('error', function (e) {
+      console.log("NewTaipei RouterStop problem with request: ", e);
+  });
+  
+  response.on('data', function(chunk) {
+      routerData += chunk;
+  });
+  
+  response.on('end', function(chunk)
+  {
+    // console.log("show the NewTaipei router stop data : "+routerData);
+    
+    var router_data = null;
+    try
+    {
+        router_data = JSON.parse(routerData);
+    }
+    catch (e)
+    {
+        console.log("show the NewTaipei router stop data : "+routerData);
+        console.log("router stop data parse error : "+e);
+        return;
+    }
+    
+    if (router_data.length == 10)
+    {
+        router_stop_NewTaipei_Index++;
+        // console.log("router_stop_NewTaipei_Index : "+router_stop_NewTaipei_Index);
+        var router_stop_NewTaipei_Options = {
+                host:'ptx.transportdata.tw',
+                path: '/MOTC/v2/Bus/StopOfRoute/City/NewTaipei/?ticket='+ptxTicket+'&%24top=10&%24skip='+(router_stop_NewTaipei_Index * 10)+'&%24format=JSON'
+            };
+
+        http.get(router_stop_NewTaipei_Options, NewTaipeiRouterStopGet_callback).end();
+    }
+    else
+    {
+        router_stop_NewTaipei_Index = 0;
+    }
+    
+    for (var i=0;i<router_data.length;i++)
+    {
+      if (router_data[i].RouteUID !== "")
+      {
+          var routeid = router_data[i].RouteUID;
+          var direction = router_data[i].Direction;
+          router_data[i].Location = 'NewTaipei';
+          //console.log('show the stops data = '+router_data[i]);
+          //console.log('show the stops number = '+router_data[i].Stops.length);
+          routerStopList.findOneAndUpdate({RouteUID: routeid, Direction: direction}, router_data[i], 
+          {"new": true, "upsert":true, "returnNewDocument":true, "passRawResult": true}, 
+          function (err, results, raw) {
+            if (err)
+            {
+                console.log("bus db find data error : "+err);
+            }
+              
+            /*if (raw.lastErrorObject.updatedExisting)
+            {
+              console.log('trace NewTaipeiRouterStop = ', results.RouteUID, 'updated');
+            }
+            else
+            {
+              console.log('trace NewTaipeiRouterStop = ', results.RouteUID, 'added');
+            }*/
+      });
+      }
+    }
+  });
+}
+
+// new cronJob('30 */30 1,2,3,4,5 * * *', function ()
+/*{
+    router_stop_NewTaipei_Index = 0;
+    var router_stop_NewTaipei_Options = {
+        host:'ptx.transportdata.tw',
+        path: '/MOTC/v2/Bus/StopOfRoute/City/NewTaipei/?ticket='+ptxTicket+'&%24top=10&%24skip='+(router_stop_NewTaipei_Index * 10)+'&%24format=JSON'
+    };
+
+    http.get(router_stop_NewTaipei_Options, NewTaipeiRouterStopGet_callback).end();
+    
+}, null, true, "Asia/Taipei");*/
+
+
+//ptx update NewTaipei N1 API database
+function NewTaipeiN1APIGet_callback(response)
+{ 
+  var routerData = '';
+  
+  response.on('error', function (e) {
+      console.log("NewTaipeiN2 problem with request: ", e);
+  });
+  
+  response.on('data', function(chunk) {
+      routerData += chunk;
+  });
+  
+  response.on('end', function(chunk)
+  {
+    //console.log("show the New Taipei N1 API data : "+routerData);
+    var router_data = null;
+    try
+    {
+        router_data = JSON.parse(routerData);
+    }
+    catch (e)
+    {
+        console.log("show the NewTaipei N1 API data : "+routerData);
+        console.log("error message : "+e);
+        bus_Estimate_Time_NewTaipei_Index = 0;
+        return;
+    }
+    
+    
+    for (var i=0;i<router_data.length;i++)
+    {
+      if (router_data[i].StopUID !== "")
+      {
+          var stopuid = router_data[i].StopUID;
+          var routeuid = router_data[i].RouteUID;
+          
+          if (router_data[i].EstimateTime == undefined)
+          {
+              router_data[i].EstimateTime = -1;
+          }
+          
+          busEstimateTime.findOneAndUpdate({StopUID: stopuid, RouteUID: routeuid}, router_data[i], 
+          {"new": true, "upsert":true, "returnNewDocument":true, "passRawResult": true}, 
+          function (err, results, raw) {
+            if (err)
+            {
+                console.log("NewTaipeiN1API db find data error : "+err);
+            }
+              
+            /*if (raw.lastErrorObject.updatedExisting)
+            {
+              console.log('trace NewTaipei N1API = ', results.StopUID, 'updated');
+            }
+            else
+            {
+              console.log('trace NewTaipei N1API = ', results.StopUID, 'added');
+            }*/
+          });
+      }
+    }
+  });
+}
+
+//new cronJob('*/42 * * * * *', function ()
+/*{
+    cityRouteEstimateTimeList.find({Location:'NewTaipei'},
+    function (err, docs) {
+        if (err)
+        {
+            console.log("stop id find data error : "+err);
+        }
+          
+        NewTaipei_total_Favor = docs.length;
+        // console.log('NewTaipei_total_Favor length = ', NewTaipei_total_Favor);
+        
+        
+        console.log('cronJob N1_NewTaipei_Index =', bus_Estimate_Time_NewTaipei_Index);
+        if (docs.length < 10)
+        {
+            for (var i=0;i<docs.length;i++)
+            {
+                // console.log('docs '+ i +' = ', docs[i].RouteUID);
+                
+                if ((docs[i].RouteUID != null) && (docs[i].likeNumber > 0))
+                {
+                    var bus_Estimate_Time_NewTaipei_Options = {
+                            host:'ptx.transportdata.tw',
+                            path: '/MOTC/v2/Bus/EstimatedTimeOfArrival/City/NewTaipei?ticket='+ptxTicket+'&%24filter=RouteUID%20eq%20\u0027'+docs[i].RouteUID+'\u0027&%24format=JSON'
+                        };
+                    http.get(bus_Estimate_Time_NewTaipei_Options, NewTaipeiN1APIGet_callback).end();
+                }
+            }
+        }
+        else
+        {
+            var searchIndex = bus_Estimate_Time_NewTaipei_Index * 10;
+            for (var i=searchIndex;i<(searchIndex+10);i++)
+            {
+                // console.log('docs '+ i +' = ', docs[i].RouteUID);
+                
+                if ((docs[i].RouteUID != null) && (docs[i].likeNumber > 0))
+                {
+                    var bus_Estimate_Time_NewTaipei_Options = {
+                            host:'ptx.transportdata.tw',
+                            path: '/MOTC/v2/Bus/EstimatedTimeOfArrival/City/NewTaipei?ticket='+ptxTicket+'&%24filter=RouteUID%20eq%20\u0027'+docs[i].RouteUID+'\u0027&%24format=JSON'
+                        };
+                    http.get(bus_Estimate_Time_NewTaipei_Options, NewTaipeiN1APIGet_callback).end();
+                }
+            }
+            bus_Estimate_Time_NewTaipei_Index++;
+            setTimeout(updateNewTaipeiBusEstimateTime, 1000, docs);
+        }
+    });
+    
+}, null, true, "Asia/Taipei");*/
+
+function updateNewTaipeiBusEstimateTime(docs)
+{
+    var searchIndex = bus_Estimate_Time_NewTaipei_Index * 10;
+    var endIndex = searchIndex + 10;
+    if (endIndex > NewTaipei_total_Favor)
+    {
+        endIndex = NewTaipei_total_Favor;
+    }
+    console.log('updateNewTaipei N1_NewTaipei_Index =', bus_Estimate_Time_NewTaipei_Index);
+    for (var i=searchIndex;i<endIndex;i++)
+    {
+        // console.log('docs '+ i +' = ', docs[i].RouteUID);
+
+        if ((docs[i].RouteUID != null) && (docs[i].likeNumber > 0))
+        {
+            var bus_Estimate_Time_NewTaipei_Options = {
+                    host:'ptx.transportdata.tw',
+                    path: '/MOTC/v2/Bus/EstimatedTimeOfArrival/City/NewTaipei?ticket='+ptxTicket+'&%24filter=RouteUID%20eq%20\u0027'+docs[i].RouteUID+'\u0027&%24format=JSON'
+                };
+            http.get(bus_Estimate_Time_NewTaipei_Options, NewTaipeiN1APIGet_callback).end();
+        }
+    }
+    
+    if (NewTaipei_total_Favor > endIndex)
+    {
+        bus_Estimate_Time_NewTaipei_Index++;
+        setTimeout(updateNewTaipeiBusEstimateTime, 1000, docs);
+    }
+    else
+    {
+        bus_Estimate_Time_NewTaipei_Index = 0;
+    }
+}
+
+//ptx update NewTaipei A2 API database
+function NewTaipeiA2APIGet_callback(response)
+{ 
+  var routerData = '';
+  response.on('error', function (e) {
+      console.log("NewTaipeiA2 problem with request: ", e);
+  });
+  
+  response.on('data', function(chunk) {
+      routerData += chunk;
+  });
+  
+  response.on('end', function(chunk)
+  {
+    //console.log("show the New Taipei N1 API data : "+routerData);
+    var router_data = null;
+    try
+    {
+        router_data = JSON.parse(routerData);
+    }
+    catch (e)
+    {
+        console.log("show the NewTaipei A2 API data : "+routerData);
+        console.log("error message : "+e);
+        bus_RealTime_Stop_NewTaipei_Index = 0;
+        return;
+    }
+    
+    // console.log("router_data.length = "+router_data.length);
+    for (var i=0;i<router_data.length;i++)
+    {
+      if (router_data[i].StopUID !== "")
+      {
+          var stopuid = router_data[i].StopUID;
+          router_data[i].RouteUID = router_data[i].RouteUID.substr(0, (router_data[i].RouteUID.length - 1)) + 0;
+          var routeuid = router_data[i].RouteUID;
+          var plateNumb = router_data[i].PlateNumb;
+          
+          busRealTimeNearStop.findOneAndUpdate({StopUID: stopuid, RouteUID: routeuid}, router_data[i], 
+          {"new": true, "upsert":true, "returnNewDocument":true, "passRawResult": true}, 
+          function (err, results, raw) {
+            if (err)
+            {
+                console.log("NewTaipeiA2API db find data error : "+err);
+            }
+              
+            /*if (raw.lastErrorObject.updatedExisting)
+            {
+              console.log('trace NewTaipei A2API = ', results.StopUID, 'updated');
+            }
+            else
+            {
+              console.log('trace NewTaipei A2API = ', results.StopUID, 'added');
+            }*/
+          });
+      }
+    }
+  });
+}
+
+// new cronJob('*/128 * * * * *', function ()
+/*{
+    //if (bus_RealTime_Stop_NewTaipei_Index == 0)
+    {
+        cityRouteEstimateTimeList.find({Location:'NewTaipei'},
+        function (err, docs) {
+            if (err)
+            {
+                console.log("stop id find data error : "+err);
+            }
+              
+            NewTaipei_total_Favor = docs.length;
+            // console.log('NewTaipei_A2_total_Favor length = ', NewTaipei_total_Favor);
+            console.log('cronJob A2_NewTaipei_Index =', bus_RealTime_Stop_NewTaipei_Index);
+            if (docs.length < 10)
+            {
+                for (var i=0;i<docs.length;i++)
+                {
+                    // console.log('docs '+ i +' = ', docs[i].RouteUID);
+                    
+                    if ((docs[i].RouteUID != null) && (docs[i].likeNumber > 0))
+                    {
+                        var routeuid = docs[i].RouteUID.substr(0, (docs[i].RouteUID.length - 1)) + 0;
+                        busRealTimeNearStop.remove({RouteUID: routeuid},
+                        function (err, results) {
+                            if (err)
+                            {
+                                console.log("route id find data error : "+err);
+                            }
+                            
+                            // console.log("delete results = "+results);
+                        });
+                        var RouteUID_search = (docs[i].RouteUID).substr(0, (docs[i].RouteUID.length - 1));
+                        var bus_Real_Time_Near_Stop_NewTaipei_Options = {
+                                host:'ptx.transportdata.tw',
+                                path: '/MOTC/v2/Bus/RealTimeNearStop/City/NewTaipei?ticket='+ptxTicket+'&%24filter=contains(RouteUID%2C%20\u0027'+RouteUID_search+'\u0027)&%24format=JSON'
+                            };
+                        http.get(bus_Real_Time_Near_Stop_NewTaipei_Options, NewTaipeiA2APIGet_callback).end();
+                    }
+                }
+            }
+            else
+            {
+                // console.log("bus_RealTime_Stop_NewTaipei_Index = "+bus_RealTime_Stop_NewTaipei_Index);
+                var searchIndex = bus_RealTime_Stop_NewTaipei_Index * 10;
+                for (var i=searchIndex;i<(searchIndex+10);i++)
+                {
+                    // console.log('docs '+ i +' = ', docs[i].RouteUID);
+                    
+                    if ((docs[i].RouteUID != null) && (docs[i].likeNumber > 0))
+                    {
+                        var routeuid = docs[i].RouteUID.substr(0, (docs[i].RouteUID.length - 1)) + 0;
+                        busRealTimeNearStop.remove({RouteUID: routeuid},
+                        function (err, results) {
+                            if (err)
+                            {
+                                console.log("route id find data error : "+err);
+                            }
+                            
+                            // console.log("delete results = "+results);
+                        });
+                        var RouteUID_search = (docs[i].RouteUID).substr(0, (docs[i].RouteUID.length - 1));
+                        var bus_Real_Time_Near_Stop_NewTaipei_Options = {
+                                host:'ptx.transportdata.tw',
+                                path: '/MOTC/v2/Bus/RealTimeNearStop/City/NewTaipei?ticket='+ptxTicket+'&%24filter=contains(RouteUID%2C%20\u0027'+RouteUID_search+'\u0027)&%24format=JSON'
+                            };
+                        http.get(bus_Real_Time_Near_Stop_NewTaipei_Options, NewTaipeiA2APIGet_callback).end();
+                    }
+                }
+                bus_RealTime_Stop_NewTaipei_Index++;
+                setTimeout(updateNewTaipeiBusRealTimeNearStop, 1000, docs);
+            }
+        });
+    }
+    
+}, null, true, "Asia/Taipei");*/
+
+function updateNewTaipeiBusRealTimeNearStop(docs)
+{
+    var searchIndex = bus_RealTime_Stop_NewTaipei_Index * 10;
+    var endIndex = searchIndex + 10;
+    if (endIndex > NewTaipei_total_Favor)
+    {
+        endIndex = NewTaipei_total_Favor;
+    }
+    // console.log("bus_RealTime_Stop_NewTaipei_Index_update = "+bus_RealTime_Stop_NewTaipei_Index);
+    // console.log("NewTaipei_total_Favor_update = "+NewTaipei_total_Favor);
+    console.log('updateNewTaipei A2_NewTaipei_Index =', bus_RealTime_Stop_NewTaipei_Index);
+    for (var i=searchIndex;i<endIndex;i++)
+    {
+        // console.log('docs '+ i +' = ', docs[i].RouteUID);
+
+        if ((docs[i].RouteUID != null) && (docs[i].likeNumber > 0))
+        {
+            var routeuid = docs[i].RouteUID.substr(0, (docs[i].RouteUID.length - 1)) + 0;
+            busRealTimeNearStop.remove({RouteUID: routeuid},
+            function (err, results) {
+                if (err)
+                {
+                    console.log("route id find data error : "+err);
+                }
+                
+                // console.log("delete results = "+results);
+            });
+            var RouteUID_search = (docs[i].RouteUID).substr(0, (docs[i].RouteUID.length - 1));
+            var bus_Real_Time_Near_Stop_NewTaipei_Options = {
+                    host:'ptx.transportdata.tw',
+                    path: '/MOTC/v2/Bus/RealTimeNearStop/City/NewTaipei?ticket='+ptxTicket+'&%24filter=contains(RouteUID%2C%20\u0027'+RouteUID_search+'\u0027)&%24format=JSON'
+                };
+            http.get(bus_Real_Time_Near_Stop_NewTaipei_Options, NewTaipeiA2APIGet_callback).end();
+        }
+    }
+    
+    if (NewTaipei_total_Favor > endIndex)
+    {
+        bus_RealTime_Stop_NewTaipei_Index++;
+        setTimeout(updateNewTaipeiBusRealTimeNearStop, 1000, docs);
+    }
+    else
+    {
+        bus_RealTime_Stop_NewTaipei_Index = 0;
+    }
+}
+
+/*
+ * Keelung bus route and stop information maintain area
+ */
+
+// Keelung route index
+var router_list_Keelung_Index = 0;
+var router_stop_Keelung_Index = 0;
+var bus_Estimate_Time_Keelung_Index = 0;
+var Keelung_total_Favor = 0;
+
+// ptx update Keelung router database
+function KeelungRouterGet_callback(response)
+{ 
+  var routerData = '';
+  
+  response.on('error', function (e) {
+      console.log("Keelung Router problem with request: ", e);
+  });
+  
+  response.on('data', function(chunk) {
+      routerData += chunk;
+  });
+  
+  response.on('end', function(chunk)
+  {
+    // console.log("show the Keelung router data : "+routerData);
+
+    var router_data = null;
+    try
+    {
+        router_data = JSON.parse(routerData);
+    }
+    catch (e)
+    {
+        console.log("show the Keelung router data : "+routerData);
+        console.log("router data parse error : "+e);
+        return;
+    }
+
+   
+    if (router_data.length == 10)
+    {
+        router_list_Keelung_Index++;
+        console.log("router_list_Keelung_Index : "+router_list_Keelung_Index);
+        var router_list_Keelung_Options = {
+                host:'ptx.transportdata.tw',
+                path: '/MOTC/v2/Bus/Route/City/Keelung/?ticket='+ptxTicket+'&%24top=10&%24skip='+(router_list_Keelung_Index * 10)+'&%24format=JSON'
+            };
+
+        http.get(router_list_Keelung_Options, KeelungRouterGet_callback).end();
+    }
+    else
+    {
+        router_list_Keelung_Index = 0;
+    }
+    
+    for (var i=0;i<router_data.length;i++)
+    {
+      if (router_data[i].RouteUID !== "")
+      {
+          var routeid = router_data[i].RouteUID;
+          router_data[i].Location = 'Keelung';
+          routerList.findOneAndUpdate({RouteUID: routeid}, router_data[i], 
+          {"new": true, "upsert":true, "returnNewDocument":true, "passRawResult": true}, 
+          function (err, results, raw) {
+            if (err)
+            {
+                console.log("bus db find data error : "+err);
+            }
+              
+            /*if (raw.lastErrorObject.updatedExisting)
+            {
+              console.log('trace Keelung Router = ', results.RouteUID, 'updated');
+            }
+            else
+            {
+              console.log('trace Keelung Router = ', results.RouteUID, 'added');
+            }*/
+      });
+      }
+    }
+  });
+}
+
+//new cronJob('00 */30 1,2,3,4,5 * * *', function ()
+/*{
+    router_list_Keelung_Index = 0;
+    var router_list_Keelung_Options = {
+        host:'ptx.transportdata.tw',
+        path: '/MOTC/v2/Bus/Route/City/Keelung/?ticket='+ptxTicket+'&%24top=10&%24skip='+(router_list_Keelung_Index * 10)+'&%24format=JSON'
+    };
+
+    http.get(router_list_Keelung_Options, KeelungRouterGet_callback).end();
+    
+}, null, true, "Asia/Taipei");*/
+
+
+//ptx update Keelung route stop station database
+function KeelungRouterStopGet_callback(response)
+{ 
+  var routerData = '';
+  
+  response.on('error', function (e) {
+      console.log("Keelung RouterStop problem with request: ", e);
+  });
+  
+  response.on('data', function(chunk) {
+      routerData += chunk;
+  });
+  
+  response.on('end', function(chunk)
+  {
+    // console.log("show the Keelung router stop data : "+routerData);
+    
+    var router_data = null;
+    try
+    {
+        router_data = JSON.parse(routerData);
+    }
+    catch (e)
+    {
+        console.log("show the Keelung router stop data : "+routerData);
+        console.log("router stop data parse error : "+e);
+        return;
+    }
+    
+    if (router_data.length == 10)
+    {
+        router_stop_Keelung_Index++;
+        // console.log("router_stop_Keelung_Index : "+router_stop_Keelung_Index);
+        var router_stop_Keelung_Options = {
+                host:'ptx.transportdata.tw',
+                path: '/MOTC/v2/Bus/StopOfRoute/City/Keelung/?ticket='+ptxTicket+'&%24top=10&%24skip='+(router_stop_Keelung_Index * 10)+'&%24format=JSON'
+            };
+
+        http.get(router_stop_Keelung_Options, KeelungRouterStopGet_callback).end();
+    }
+    else
+    {
+        router_stop_Keelung_Index = 0;
+    }
+    
+    for (var i=0;i<router_data.length;i++)
+    {
+      if (router_data[i].RouteUID !== "")
+      {
+          var routeid = router_data[i].RouteUID;
+          var direction = router_data[i].Direction;
+          router_data[i].Location = 'Keelung';
+          //console.log('show the stops data = '+router_data[i]);
+          //console.log('show the stops number = '+router_data[i].Stops.length);
+          routerStopList.findOneAndUpdate({RouteUID: routeid, Direction: direction}, router_data[i], 
+          {"new": true, "upsert":true, "returnNewDocument":true, "passRawResult": true}, 
+          function (err, results, raw) {
+            if (err)
+            {
+                console.log("bus db find data error : "+err);
+            }
+              
+            /*if (raw.lastErrorObject.updatedExisting)
+            {
+              console.log('trace Keelung RouterStop = ', results.RouteUID, 'updated');
+            }
+            else
+            {
+              console.log('trace Keelung RouterStop = ', results.RouteUID, 'added');
+            }*/
+      });
+      }
+    }
+  });
+}
+
+// new cronJob('30 */30 1,2,3,4,5 * * *', function ()
+/*{
+    router_stop_Keelung_Index = 0;
+    var router_stop_Keelung_Options = {
+        host:'ptx.transportdata.tw',
+        path: '/MOTC/v2/Bus/StopOfRoute/City/Keelung/?ticket='+ptxTicket+'&%24top=10&%24skip='+(router_stop_Keelung_Index * 10)+'&%24format=JSON'
+    };
+
+    http.get(router_stop_Keelung_Options, KeelungRouterStopGet_callback).end();
+    
+}, null, true, "Asia/Taipei");*/
+
+
+//ptx update Keelung N1 API database
+function KeelungN1APIGet_callback(response)
+{ 
+  var routerData = '';
+  
+  response.on('error', function (e) {
+      console.log("KeelungN1 problem with request: ", e);
+  });
+  
+  response.on('data', function(chunk) {
+      routerData += chunk;
+  });
+  
+  response.on('end', function(chunk)
+  {
+    //console.log("show the Keelung N1 API data : "+routerData);
+    var router_data = null;
+    try
+    {
+        router_data = JSON.parse(routerData);
+    }
+    catch (e)
+    {
+        console.log("show the Keelung N1 API data : "+routerData);
+        console.log("error message : "+e);
+        return;
+    }
+    
+    
+    for (var i=0;i<router_data.length;i++)
+    {
+      if (router_data[i].StopUID !== "")
+      {
+          var stopuid = router_data[i].StopUID;
+          var routeuid = router_data[i].RouteUID;
+          var direction = router_data[i].Direction;
+          
+          // console.log('EST time = ', router_data[i].EstimateTime);
+          if (router_data[i].EstimateTime == undefined)
+          {
+              router_data[i].EstimateTime = -1;
+          }
+          
+          if (router_data[i].StopStatus == undefined)
+          {
+              router_data[i].StopStatus = 0;
+          }
+          
+          busEstimateTime.findOneAndUpdate({StopUID: stopuid, RouteUID: routeuid, Direction: direction}, router_data[i], 
+          {"new": true, "upsert":true, "returnNewDocument":true, "passRawResult": true}, 
+          function (err, results, raw) {
+            if (err)
+            {
+                console.log("Keelung N1API db find data error : "+err);
+            }
+              
+            /*if (raw.lastErrorObject.updatedExisting)
+            {
+              console.log('trace Keelung N1API = ', results.StopUID, 'updated');
+            }
+            else
+            {
+              console.log('trace Keelung N1API = ', results.StopUID, 'added');
+            }*/
+          });
+      }
+    }
+  });
+}
+
+// new cronJob('*/60 * * * * *', function ()
+/*{
+    cityRouteEstimateTimeList.find({Location:'Keelung'},
+    function (err, docs) {
+        if (err)
+        {
+            console.log("stop id find data error : "+err);
+        }
+          
+        Keelung_total_Favor = docs.length;
+        // console.log('Keelung_total_Favor length = ', Keelung_total_Favor);
+        
+        if (docs.length < 10)
+        {
+            for (var i=0;i<docs.length;i++)
+            {
+                // console.log('docs '+ i +' = ', docs[i].RouteUID);
+                
+                if ((docs[i].RouteUID != null) && (docs[i].likeNumber > 0))
+                {
+                    var bus_Estimate_Time_Keelung_Options = {
+                            host:'ptx.transportdata.tw',
+                            path: '/MOTC/v2/Bus/EstimatedTimeOfArrival/City/Keelung?ticket='+ptxTicket+'&%24filter=RouteUID%20eq%20\u0027'+docs[i].RouteUID+'\u0027&%24format=JSON'
+                        };
+                    http.get(bus_Estimate_Time_Keelung_Options, KeelungN1APIGet_callback).end();
+                }
+            }
+        }
+        else
+        {
+            var searchIndex = bus_Estimate_Time_Keelung_Index * 10;
+            for (var i=searchIndex;i<(searchIndex+10);i++)
+            {
+                // console.log('docs '+ i +' = ', docs[i].RouteUID);
+                
+                if ((docs[i].RouteUID != null) && (docs[i].likeNumber > 0))
+                {
+                    var bus_Estimate_Time_Keelung_Options = {
+                            host:'ptx.transportdata.tw',
+                            path: '/MOTC/v2/Bus/EstimatedTimeOfArrival/City/Keelung?ticket='+ptxTicket+'&%24filter=RouteUID%20eq%20\u0027'+docs[i].RouteUID+'\u0027&%24format=JSON'
+                        };
+                    http.get(bus_Estimate_Time_Keelung_Options, KeelungN1APIGet_callback).end();
+                }
+            }
+            bus_Estimate_Time_Keelung_Index++;
+            setTimeout(updateKeelungBusEstimateTime, 1000, docs);
+        }
+    });
+    
+}, null, true, "Asia/Taipei");*/
+
+function updateKeelungBusEstimateTime(docs)
+{
+    var searchIndex = bus_Estimate_Time_Keelung_Index * 10;
+    var endIndex = searchIndex + 10;
+    if (endIndex > Keelung_total_Favor)
+    {
+        endIndex = Keelung_total_Favor;
+    }
+    
+    for (var i=searchIndex;i<endIndex;i++)
+    {
+        // console.log('docs '+ i +' = ', docs[i].RouteUID);
+
+        if ((docs[i].RouteUID != null) && (docs[i].likeNumber > 0))
+        {
+            var bus_Estimate_Time_Keelung_Options = {
+                    host:'ptx.transportdata.tw',
+                    path: '/MOTC/v2/Bus/EstimatedTimeOfArrival/City/Keelung?ticket='+ptxTicket+'&%24filter=RouteUID%20eq%20\u0027'+docs[i].RouteUID+'\u0027&%24format=JSON'
+                };
+            http.get(bus_Estimate_Time_Keelung_Options, KeelungN1APIGet_callback).end();
+        }
+    }
+    
+    if (Keelung_total_Favor > endIndex)
+    {
+        bus_Estimate_Time_Keelung_Index++;
+        setTimeout(updateKeelungBusEstimateTime, 1000, docs);
+    }
+    else
+    {
+        bus_Estimate_Time_Keelung_Index = 0;
+    }
+}
+
+
+/*
+ * Taoyuan bus route and stop information maintain area
+ */
+
+// Taoyuan route index
+var router_list_Taoyuan_Index = 0;
+var router_stop_Taoyuan_Index = 0;
+var bus_Estimate_Time_Taoyuan_Index = 0;
+var Taoyuan_total_Favor = 0;
+
+// ptx update Taoyuan router database
+function TaoyuanRouterGet_callback(response)
+{ 
+  var routerData = '';
+  
+  response.on('error', function (e) {
+      console.log("Taoyuan Router problem with request: ", e);
+  });
+  
+  response.on('data', function(chunk) {
+      routerData += chunk;
+  });
+  
+  response.on('end', function(chunk)
+  {
+    // console.log("show the Taoyuan router data : "+routerData);
+
+    var router_data = null;
+    try
+    {
+        router_data = JSON.parse(routerData);
+    }
+    catch (e)
+    {
+        console.log("show the Taoyuan router data : "+routerData);
+        console.log("router data parse error : "+e);
+        return;
+    }
+
+   
+    if (router_data.length == 10)
+    {
+        router_list_Taoyuan_Index++;
+        // console.log("router_list_Taoyuan_Index : "+router_list_Taoyuan_Index);
+        var router_list_Taoyuan_Options = {
+                host:'ptx.transportdata.tw',
+                path: '/MOTC/v2/Bus/Route/City/Taoyuan/?ticket='+ptxTicket+'&%24top=10&%24skip='+(router_list_Taoyuan_Index * 10)+'&%24format=JSON'
+            };
+
+        http.get(router_list_Taoyuan_Options, TaoyuanRouterGet_callback).end();
+    }
+    else
+    {
+        router_list_Taoyuan_Index = 0;
+    }
+    
+    for (var i=0;i<router_data.length;i++)
+    {
+      if (router_data[i].RouteUID !== "")
+      {
+          var routeid = router_data[i].RouteUID;
+          router_data[i].Location = 'Taoyuan';
+          routerList.findOneAndUpdate({RouteUID: routeid}, router_data[i], 
+          {"new": true, "upsert":true, "returnNewDocument":true, "passRawResult": true}, 
+          function (err, results, raw) {
+            if (err)
+            {
+                console.log("bus db find data error : "+err);
+            }
+              
+            /*if (raw.lastErrorObject.updatedExisting)
+            {
+              console.log('trace Taoyuan Router = ', results.RouteUID, 'updated');
+            }
+            else
+            {
+              console.log('trace Taoyuan Router = ', results.RouteUID, 'added');
+            }*/
+      });
+      }
+    }
+  });
+}
+
+// new cronJob('00 */30 1,2,3,4,5 * * *', function ()
+/*{
+    router_list_Taoyuan_Index = 0;
+    var router_list_Taoyuan_Options = {
+        host:'ptx.transportdata.tw',
+        path: '/MOTC/v2/Bus/Route/City/Taoyuan/?ticket='+ptxTicket+'&%24top=10&%24skip='+(router_list_Taoyuan_Index * 10)+'&%24format=JSON'
+    };
+
+    http.get(router_list_Taoyuan_Options, TaoyuanRouterGet_callback).end();
+    
+}, null, true, "Asia/Taipei");*/
+
+
+//ptx update Taoyuan route stop station database
+function TaoyuanRouterStopGet_callback(response)
+{ 
+  var routerData = '';
+  
+  response.on('error', function (e) {
+      console.log("Taoyuan RouterStop problem with request: ", e);
+  });
+  
+  response.on('data', function(chunk) {
+      routerData += chunk;
+  });
+  
+  response.on('end', function(chunk)
+  {
+    // console.log("show the Taoyuan router stop data : "+routerData);
+    
+    var router_data = null;
+    try
+    {
+        router_data = JSON.parse(routerData);
+    }
+    catch (e)
+    {
+        console.log("show the Taoyuan router stop data : "+routerData);
+        console.log("router stop data parse error : "+e);
+        return;
+    }
+    
+    if (router_data.length == 10)
+    {
+        router_stop_Taoyuan_Index++;
+        // console.log("router_stop_Taoyuan_Index : "+router_stop_Taoyuan_Index);
+        var router_stop_Taoyuan_Options = {
+                host:'ptx.transportdata.tw',
+                path: '/MOTC/v2/Bus/StopOfRoute/City/Taoyuan/?ticket='+ptxTicket+'&%24top=10&%24skip='+(router_stop_Taoyuan_Index * 10)+'&%24format=JSON'
+            };
+
+        http.get(router_stop_Taoyuan_Options, TaoyuanRouterStopGet_callback).end();
+    }
+    else
+    {
+        router_stop_Taoyuan_Index = 0;
+    }
+    
+    for (var i=0;i<router_data.length;i++)
+    {
+      if (router_data[i].RouteUID !== "")
+      {
+          var routeid = router_data[i].RouteUID;
+          var direction = router_data[i].Direction;
+          router_data[i].Location = 'Taoyuan';
+          //console.log('show the stops data = '+router_data[i]);
+          //console.log('show the stops number = '+router_data[i].Stops.length);
+          routerStopList.findOneAndUpdate({RouteUID: routeid, Direction: direction}, router_data[i], 
+          {"new": true, "upsert":true, "returnNewDocument":true, "passRawResult": true}, 
+          function (err, results, raw) {
+            if (err)
+            {
+                console.log("bus db find data error : "+err);
+            }
+              
+            /*if (raw.lastErrorObject.updatedExisting)
+            {
+              console.log('trace Taoyuan RouterStop = ', results.RouteUID, 'updated');
+            }
+            else
+            {
+              console.log('trace Taoyuan RouterStop = ', results.RouteUID, 'added');
+            }*/
+      });
+      }
+    }
+  });
+}
+
+// new cronJob('30 */30 1,2,3,4,5 * * *', function ()
+/*{
+    router_stop_Taoyuan_Index = 0;
+    var router_stop_Taoyuan_Options = {
+        host:'ptx.transportdata.tw',
+        path: '/MOTC/v2/Bus/StopOfRoute/City/Taoyuan/?ticket='+ptxTicket+'&%24top=10&%24skip='+(router_stop_Taoyuan_Index * 10)+'&%24format=JSON'
+    };
+
+    http.get(router_stop_Taoyuan_Options, TaoyuanRouterStopGet_callback).end();
+    
+}, null, true, "Asia/Taipei");*/
+
+
+//ptx update Taoyuan N1 API database
+function TaoyuanN1APIGet_callback(response)
+{ 
+  var routerData = '';
+  
+  response.on('error', function (e) {
+      console.log("TaoyuanN1 problem with request: ", e);
+  });
+  
+  response.on('data', function(chunk) {
+      routerData += chunk;
+  });
+  
+  response.on('end', function(chunk)
+  {
+    //console.log("show the Taoyuan N1 API data : "+routerData);
+    var router_data = null;
+    try
+    {
+        router_data = JSON.parse(routerData);
+    }
+    catch (e)
+    {
+        console.log("show the Taoyuan N1 API data : "+routerData);
+        console.log("error message : "+e);
+        return;
+    }
+    
+    
+    for (var i=0;i<router_data.length;i++)
+    {
+      if (router_data[i].StopUID !== "")
+      {
+          var stopuid = router_data[i].StopUID;
+          var routeuid = router_data[i].RouteUID;
+          var direction = router_data[i].Direction;
+          
+          if (router_data[i].EstimateTime == undefined)
+          {
+              router_data[i].EstimateTime = -1;
+          }
+          
+          if (router_data[i].StopStatus == undefined)
+          {
+              router_data[i].StopStatus = 0;
+          }
+          
+          busEstimateTime.findOneAndUpdate({StopUID: stopuid, RouteUID: routeuid, Direction: direction}, router_data[i], 
+          {"new": true, "upsert":true, "returnNewDocument":true, "passRawResult": true}, 
+          function (err, results, raw) {
+            if (err)
+            {
+                console.log("Taoyuan N1API db find data error : "+err);
+            }
+              
+            /*if (raw.lastErrorObject.updatedExisting)
+            {
+              console.log('trace Taoyuan N1API = ', results.StopUID, 'updated');
+            }
+            else
+            {
+              console.log('trace Taoyuan N1API = ', results.StopUID, 'added');
+            }*/
+          });
+      }
+    }
+  });
+}
+
+// new cronJob('*/45 * * * * *', function ()
+/*{
+    cityRouteEstimateTimeList.find({Location:'Taoyuan'},
+    function (err, docs) {
+        if (err)
+        {
+            console.log("stop id find data error : "+err);
+        }
+          
+        Taoyuan_total_Favor = docs.length;
+        // console.log('Taoyuan_total_Favor length = ', Taoyuan_total_Favor);
+        
+        if (docs.length < 10)
+        {
+            for (var i=0;i<docs.length;i++)
+            {
+                // console.log('docs '+ i +' = ', docs[i].RouteUID);
+                
+                if ((docs[i].RouteUID != null) && (docs[i].likeNumber > 0))
+                {
+                    var bus_Estimate_Time_Taoyuan_Options = {
+                            host:'ptx.transportdata.tw',
+                            path: '/MOTC/v2/Bus/EstimatedTimeOfArrival/City/Taoyuan?ticket='+ptxTicket+'&%24filter=RouteUID%20eq%20\u0027'+docs[i].RouteUID+'\u0027&%24format=JSON'
+                        };
+                    http.get(bus_Estimate_Time_Taoyuan_Options, TaoyuanN1APIGet_callback).end();
+                }
+            }
+        }
+        else
+        {
+            var searchIndex = bus_Estimate_Time_Taoyuan_Index * 10;
+            for (var i=searchIndex;i<(searchIndex+10);i++)
+            {
+                // console.log('docs '+ i +' = ', docs[i].RouteUID);
+                
+                if ((docs[i].RouteUID != null) && (docs[i].likeNumber > 0))
+                {
+                    var bus_Estimate_Time_Taoyuan_Options = {
+                            host:'ptx.transportdata.tw',
+                            path: '/MOTC/v2/Bus/EstimatedTimeOfArrival/City/Taoyuan?ticket='+ptxTicket+'&%24filter=RouteUID%20eq%20\u0027'+docs[i].RouteUID+'\u0027&%24format=JSON'
+                        };
+                    http.get(bus_Estimate_Time_Taoyuan_Options, TaoyuanN1APIGet_callback).end();
+                }
+            }
+            bus_Estimate_Time_Taoyuan_Index++;
+            setTimeout(updateTaoyuanBusEstimateTime, 1000, docs);
+        }
+    });
+    
+}, null, true, "Asia/Taipei");*/
+
+function updateTaoyuanBusEstimateTime(docs)
+{
+    var searchIndex = bus_Estimate_Time_Taoyuan_Index * 10;
+    var endIndex = searchIndex + 10;
+    if (endIndex > Taoyuan_total_Favor)
+    {
+        endIndex = Taoyuan_total_Favor;
+    }
+    
+    for (var i=searchIndex;i<endIndex;i++)
+    {
+        // console.log('docs '+ i +' = ', docs[i].RouteUID);
+
+        if ((docs[i].RouteUID != null) && (docs[i].likeNumber > 0))
+        {
+            var bus_Estimate_Time_Taoyuan_Options = {
+                    host:'ptx.transportdata.tw',
+                    path: '/MOTC/v2/Bus/EstimatedTimeOfArrival/City/Taoyuan?ticket='+ptxTicket+'&%24filter=RouteUID%20eq%20\u0027'+docs[i].RouteUID+'\u0027&%24format=JSON'
+                };
+            http.get(bus_Estimate_Time_Taoyuan_Options, TaoyuanN1APIGet_callback).end();
+        }
+    }
+    
+    if (Taoyuan_total_Favor > endIndex)
+    {
+        bus_Estimate_Time_Taoyuan_Index++;
+        setTimeout(updateTaoyuanBusEstimateTime, 1000, docs);
+    }
+    else
+    {
+        bus_Estimate_Time_Taoyuan_Index = 0;
+    }
+}
+
+
+/*
+ * Tainan bus route and stop information maintain area
+ */
+
+// Tainan route index
+var router_list_Tainan_Index = 0;
+var router_stop_Tainan_Index = 0;
+var bus_Estimate_Time_Tainan_Index = 0;
+var bus_RealTime_Stop_Tainan_Index = 0;
+var Tainan_total_Favor = 0;
+
+// ptx update Tainan router database
+function TainanRouterGet_callback(response)
+{ 
+  var routerData = '';
+  
+  response.on('error', function (e) {
+      console.log("Tainan Router problem with request: ", e);
+  });
+  
+  response.on('data', function(chunk) {
+      routerData += chunk;
+  });
+  
+  response.on('end', function(chunk)
+  {
+    // console.log("show the Tainan router data : "+routerData);
+
+    var router_data = null;
+    try
+    {
+        router_data = JSON.parse(routerData);
+    }
+    catch (e)
+    {
+        console.log("show the Tainan router data : "+routerData);
+        console.log("router data parse error : "+e);
+        return;
+    }
+
+    if (router_data.length == 10)
+    {
+        router_list_Tainan_Index++;
+        // console.log("router_list_Tainan_Index : "+router_list_Tainan_Index);
+        var router_list_Tainan_Options = {
+                host:'ptx.transportdata.tw',
+                path: '/MOTC/v2/Bus/Route/City/Tainan/?ticket='+ptxTicket+'&%24top=10&%24skip='+(router_list_Tainan_Index * 10)+'&%24format=JSON'
+            };
+
+        http.get(router_list_Tainan_Options, TainanRouterGet_callback).end();
+    }
+    else
+    {
+        router_list_Tainan_Index = 0;
+    }
+    
+    for (var i=0;i<router_data.length;i++)
+    {
+      if (router_data[i].RouteUID !== "")
+      {
+          var routeid = router_data[i].RouteUID;
+          router_data[i].Location = 'Tainan';
+          routerList.findOneAndUpdate({RouteUID: routeid}, router_data[i], 
+          {"new": true, "upsert":true, "returnNewDocument":true, "passRawResult": true}, 
+          function (err, results, raw) {
+            if (err)
+            {
+                console.log("bus db find data error : "+err);
+            }
+              
+            /*if (raw.lastErrorObject.updatedExisting)
+            {
+              console.log('trace Tainan Router = ', results.RouteUID, 'updated');
+            }
+            else
+            {
+              console.log('trace Tainan Router = ', results.RouteUID, 'added');
+            }*/
+      });
+      }
+    }
+  });
+}
+
+// new cronJob('00 */30 1,2,3,4,5 * * *', function ()
+/*{
+    router_list_Tainan_Index = 0;
+    var router_list_Tainan_Options = {
+        host:'ptx.transportdata.tw',
+        path: '/MOTC/v2/Bus/Route/City/Tainan/?ticket='+ptxTicket+'&%24top=10&%24skip='+(router_list_Tainan_Index * 10)+'&%24format=JSON'
+    };
+
+    http.get(router_list_Tainan_Options, TainanRouterGet_callback).end();
+    
+}, null, true, "Asia/Taipei");*/
+
+
+//ptx update Tainan route stop station database
+function TainanRouterStopGet_callback(response)
+{ 
+  var routerData = '';
+  
+  response.on('error', function (e) {
+      console.log("Tainan RouterStop problem with request: ", e);
+  });
+  
+  response.on('data', function(chunk) {
+      routerData += chunk;
+  });
+  
+  response.on('end', function(chunk)
+  {
+    console.log("show the Tainan router stop data : "+routerData);
+    
+    var router_data = null;
+    try
+    {
+        router_data = JSON.parse(routerData);
+    }
+    catch (e)
+    {
+        console.log("show the Tainan router stop data : "+routerData);
+        console.log("router stop data parse error : "+e);
+        return;
+    }
+    
+    if (router_data.length == 10)
+    {
+        router_stop_Tainan_Index++;
+        // console.log("router_stop_Tainan_Index : "+router_stop_Tainan_Index);
+        var router_stop_Tainan_Options = {
+                host:'ptx.transportdata.tw',
+                path: '/MOTC/v2/Bus/StopOfRoute/City/Tainan/?ticket='+ptxTicket+'&%24top=10&%24skip='+(router_stop_Tainan_Index * 10)+'&%24format=JSON'
+            };
+
+        http.get(router_stop_Tainan_Options, TainanRouterStopGet_callback).end();
+    }
+    else
+    {
+        router_stop_Tainan_Index = 0;
+    }
+    
+    for (var i=0;i<router_data.length;i++)
+    {
+      if (router_data[i].RouteUID !== "")
+      {
+          var routeid = router_data[i].RouteUID;
+          var direction = router_data[i].Direction;
+          router_data[i].Location = 'Tainan';
+          //console.log('show the stops data = '+router_data[i]);
+          //console.log('show the stops number = '+router_data[i].Stops.length);
+          routerStopList.findOneAndUpdate({RouteUID: routeid, Direction: direction}, router_data[i], 
+          {"new": true, "upsert":true, "returnNewDocument":true, "passRawResult": true}, 
+          function (err, results, raw) {
+            if (err)
+            {
+                console.log("bus db find data error : "+err);
+            }
+              
+            /*if (raw.lastErrorObject.updatedExisting)
+            {
+              console.log('trace Tainan RouterStop = ', results.RouteUID, 'updated');
+            }
+            else
+            {
+              console.log('trace Tainan RouterStop = ', results.RouteUID, 'added');
+            }*/
+      });
+      }
+    }
+  });
+}
+
+// new cronJob('30 */30 1,2,3,4,5 * * *', function ()
+/*{
+    router_stop_Tainan_Index = 0;
+    var router_stop_Tainan_Options = {
+        host:'ptx.transportdata.tw',
+        path: '/MOTC/v2/Bus/StopOfRoute/City/Tainan/?ticket='+ptxTicket+'&%24top=10&%24skip='+(router_stop_Tainan_Index * 10)+'&%24format=JSON'
+    };
+
+    http.get(router_stop_Tainan_Options, TainanRouterStopGet_callback).end();
+    
+}, null, true, "Asia/Taipei");*/
+
+
+//ptx update Tainan N1 API database
+function TainanN1APIGet_callback(response)
+{ 
+  var routerData = '';
+  
+  response.on('error', function (e) {
+      console.log("TainanN1 problem with request: ", e);
+  });
+  
+  response.on('data', function(chunk) {
+      routerData += chunk;
+  });
+  
+  response.on('end', function(chunk)
+  {
+    //console.log("show the Tainan N1 API data : "+routerData);
+    var router_data = null;
+    try
+    {
+        router_data = JSON.parse(routerData);
+    }
+    catch (e)
+    {
+        console.log("show the Tainan N1 API data : "+routerData);
+        console.log("error message : "+e);
+        return;
+    }
+    
+    
+    for (var i=0;i<router_data.length;i++)
+    {
+      if (router_data[i].StopUID !== "")
+      {
+          var stopuid = router_data[i].StopUID;
+          var routeuid = router_data[i].RouteUID;
+          
+          if (router_data[i].EstimateTime == undefined)
+          {
+              router_data[i].EstimateTime = -1;
+          }
+          
+          if (router_data[i].StopStatus == undefined)
+          {
+              router_data[i].StopStatus = 0;
+          }
+          
+          busEstimateTime.findOneAndUpdate({StopUID: stopuid, RouteUID: routeuid}, router_data[i], 
+          {"new": true, "upsert":true, "returnNewDocument":true, "passRawResult": true}, 
+          function (err, results, raw) {
+            if (err)
+            {
+                console.log("Tainan N1API db find data error : "+err);
+            }
+              
+            /*if (raw.lastErrorObject.updatedExisting)
+            {
+              console.log('trace Tainan N1API = ', results.StopUID, 'updated');
+            }
+            else
+            {
+              console.log('trace Tainan N1API = ', results.StopUID, 'added');
+            }*/
+          });
+      }
+    }
+  });
+}
+
+// new cronJob('03 */01 * * * *', function ()
+/*{
+    cityRouteEstimateTimeList.find({Location:'Tainan'},
+    function (err, docs) {
+        if (err)
+        {
+            console.log("stop id find data error : "+err);
+        }
+          
+        Tainan_total_Favor = docs.length;
+        // console.log('Tainan_total_Favor length = ', Tainan_total_Favor);
+        
+        if (docs.length < 10)
+        {
+            for (var i=0;i<docs.length;i++)
+            {
+                // console.log('docs '+ i +' = ', docs[i].RouteUID);
+                
+                if ((docs[i].RouteUID != null) && (docs[i].likeNumber > 0))
+                {
+                    var bus_Estimate_Time_Tainan_Options = {
+                            host:'ptx.transportdata.tw',
+                            path: '/MOTC/v2/Bus/EstimatedTimeOfArrival/City/Tainan?ticket='+ptxTicket+'&%24filter=RouteUID%20eq%20\u0027'+docs[i].RouteUID+'\u0027&%24format=JSON'
+                        };
+                    http.get(bus_Estimate_Time_Tainan_Options, TainanN1APIGet_callback).end();
+                }
+            }
+        }
+        else
+        {
+            var searchIndex = bus_Estimate_Time_Tainan_Index * 10;
+            for (var i=searchIndex;i<(searchIndex+10);i++)
+            {
+                // console.log('docs '+ i +' = ', docs[i].RouteUID);
+                
+                if ((docs[i].RouteUID != null) && (docs[i].likeNumber > 0))
+                {
+                    var bus_Estimate_Time_Tainan_Options = {
+                            host:'ptx.transportdata.tw',
+                            path: '/MOTC/v2/Bus/EstimatedTimeOfArrival/City/Tainan?ticket='+ptxTicket+'&%24filter=RouteUID%20eq%20\u0027'+docs[i].RouteUID+'\u0027&%24format=JSON'
+                        };
+                    http.get(bus_Estimate_Time_Tainan_Options, TainanN1APIGet_callback).end();
+                }
+            }
+            bus_Estimate_Time_Tainan_Index++;
+            setTimeout(updateTainanBusEstimateTime, 1000, docs);
+        }
+    });
+    
+}, null, true, "Asia/Taipei");*/
+
+function updateTainanBusEstimateTime(docs)
+{
+    var searchIndex = bus_Estimate_Time_Tainan_Index * 10;
+    var endIndex = searchIndex + 10;
+    if (endIndex > Tainan_total_Favor)
+    {
+        endIndex = Tainan_total_Favor;
+    }
+    
+    for (var i=searchIndex;i<endIndex;i++)
+    {
+        // console.log('docs '+ i +' = ', docs[i].RouteUID);
+
+        if ((docs[i].RouteUID != null) && (docs[i].likeNumber > 0))
+        {
+            var bus_Estimate_Time_Tainan_Options = {
+                    host:'ptx.transportdata.tw',
+                    path: '/MOTC/v2/Bus/EstimatedTimeOfArrival/City/Tainan?ticket='+ptxTicket+'&%24filter=RouteUID%20eq%20\u0027'+docs[i].RouteUID+'\u0027&%24format=JSON'
+                };
+            http.get(bus_Estimate_Time_Tainan_Options, TainanN1APIGet_callback).end();
+        }
+    }
+    
+    if (Tainan_total_Favor > endIndex)
+    {
+        bus_Estimate_Time_Tainan_Index++;
+        setTimeout(updateTainanBusEstimateTime, 1000, docs);
+    }
+    else
+    {
+        bus_Estimate_Time_Tainan_Index = 0;
+    }
+}
+
+// ptx update Tainan A2 API database
+function TainanA2APIGet_callback(response)
+{ 
+  var routerData = '';
+  
+  response.on('error', function (e) {
+      console.log("TainanA2 problem with request: ", e);
+  });
+  
+  response.on('data', function(chunk) {
+      routerData += chunk;
+  });
+  
+  response.on('end', function(chunk)
+  {
+    //console.log("show the Tainan N1 API data : "+routerData);
+    var router_data = null;
+    try
+    {
+        router_data = JSON.parse(routerData);
+    }
+    catch (e)
+    {
+        console.log("show the Tainan A2 API data : "+routerData);
+        console.log("error message : "+e);
+        return;
+    }
+    
+    // console.log("router_data.length = "+router_data.length);
+    for (var i=0;i<router_data.length;i++)
+    {
+      if (router_data[i].StopUID !== "")
+      {
+          var stopuid = router_data[i].StopUID;
+          var routeuid = router_data[i].RouteUID;
+          
+          busRealTimeNearStop.findOneAndUpdate({StopUID: stopuid, RouteUID: routeuid}, router_data[i], 
+          {"new": true, "upsert":true, "returnNewDocument":true, "passRawResult": true}, 
+          function (err, results, raw) {
+            if (err)
+            {
+                console.log("TainanA2API db find data error : "+err);
+            }
+              
+            /*if (raw.lastErrorObject.updatedExisting)
+            {
+              console.log('trace Tainan A2API = ', results.StopUID, 'updated');
+            }
+            else
+            {
+              console.log('trace Tainan A2API = ', results.StopUID, 'added');
+            }*/
+          });
+      }
+    }
+  });
+}
+
+// new cronJob('10 */01 * * * *', function ()
+/*{
+    cityRouteEstimateTimeList.find({Location:'Tainan'},
+    function (err, docs) {
+        if (err)
+        {
+            console.log("stop id find data error : "+err);
+        }
+          
+        Tainan_total_Favor = docs.length;
+        // console.log('Tainan_A2_total_Favor length = ', Tainan_total_Favor);
+        
+        if (docs.length < 10)
+        {
+            for (var i=0;i<docs.length;i++)
+            {
+                // console.log('docs '+ i +' = ', docs[i].RouteUID);
+                
+                if ((docs[i].RouteUID != null) && (docs[i].likeNumber > 0))
+                {
+                    var routeuid = docs[i].RouteUID;
+                    busRealTimeNearStop.remove({RouteUID: routeuid},
+                    function (err, results) {
+                        if (err)
+                        {
+                            console.log("route id find data error : "+err);
+                        }
+                        
+                        // console.log("delete results = "+results);
+                    });
+                    var bus_Real_Time_Near_Stop_Tainan_Options = {
+                            host:'ptx.transportdata.tw',
+                            path: '/MOTC/v2/Bus/RealTimeNearStop/City/Tainan?ticket='+ptxTicket+'&%24filter=contains(RouteUID%2C%20\u0027'+routeuid+'\u0027)&%24format=JSON'
+                        };
+                    http.get(bus_Real_Time_Near_Stop_Tainan_Options, TainanA2APIGet_callback).end();
+                }
+            }
+        }
+        else
+        {
+            var searchIndex = bus_RealTime_Stop_Tainan_Index * 10;
+            for (var i=searchIndex;i<(searchIndex+10);i++)
+            {
+                // console.log('docs '+ i +' = ', docs[i].RouteUID);
+                
+                if ((docs[i].RouteUID != null) && (docs[i].likeNumber > 0))
+                {
+                    var routeuid = docs[i].RouteUID;
+                    busRealTimeNearStop.remove({RouteUID: routeuid},
+                    function (err, results) {
+                        if (err)
+                        {
+                            console.log("route id find data error : "+err);
+                        }
+                        
+                        // console.log("delete results = "+results);
+                    });
+                    var bus_Real_Time_Near_Stop_Tainan_Options = {
+                            host:'ptx.transportdata.tw',
+                            path: '/MOTC/v2/Bus/RealTimeNearStop/City/Tainan?ticket='+ptxTicket+'&%24filter=contains(RouteUID%2C%20\u0027'+routeuid+'\u0027)&%24format=JSON'
+                        };
+                    http.get(bus_Real_Time_Near_Stop_Tainan_Options, TainanA2APIGet_callback).end();
+                }
+            }
+            bus_RealTime_Stop_Tainan_Index++;
+            setTimeout(updateTainanBusRealTimeNearStop, 1000, docs);
+        }
+    });
+    
+}, null, true, "Asia/Taipei");*/
+
+function updateTainanBusRealTimeNearStop(docs)
+{
+    var searchIndex = bus_RealTime_Stop_Tainan_Index * 10;
+    var endIndex = searchIndex + 10;
+    if (endIndex > Tainan_total_Favor)
+    {
+        endIndex = Tainan_total_Favor;
+    }
+    
+    for (var i=searchIndex;i<endIndex;i++)
+    {
+        // console.log('docs '+ i +' = ', docs[i].RouteUID);
+
+        if ((docs[i].RouteUID != null) && (docs[i].likeNumber > 0))
+        {
+            var routeuid = docs[i].RouteUID;
+            busRealTimeNearStop.remove({RouteUID: routeuid},
+            function (err, results) {
+                if (err)
+                {
+                    console.log("route id find data error : "+err);
+                }
+                
+                // console.log("delete results = "+results);
+            });
+            var bus_Real_Time_Near_Stop_Tainan_Options = {
+                    host:'ptx.transportdata.tw',
+                    path: '/MOTC/v2/Bus/RealTimeNearStop/City/Tainan?ticket='+ptxTicket+'&%24filter=contains(RouteUID%2C%20\u0027'+routeuid+'\u0027)&%24format=JSON'
+                };
+            http.get(bus_Real_Time_Near_Stop_Tainan_Options, TainanA2APIGet_callback).end();
+        }
+    }
+    
+    if (Tainan_total_Favor > endIndex)
+    {
+        bus_RealTime_Stop_Tainan_Index++;
+        setTimeout(updateTainanBusRealTimeNearStop, 1000, docs);
+    }
+    else
+    {
+        bus_RealTime_Stop_Tainan_Index = 0;
+    }
+}
+
+/*
+ * Kaohsiung bus route and stop information maintain area
+ */
+
+// Kaohsiung route index
+var router_list_Kaohsiung_Index = 0;
+var router_stop_Kaohsiung_Index = 0;
+var bus_Estimate_Time_Kaohsiung_Index = 0;
+var Kaohsiung_total_Favor = 0;
+
+// ptx update Kaohsiung router database
+function KaohsiungRouterGet_callback(response)
+{ 
+  var routerData = '';
+  
+  response.on('error', function (e) {
+      console.log("Kaohsiung Router problem with request: ", e);
+  });
+  
+  response.on('data', function(chunk) {
+      routerData += chunk;
+  });
+  
+  response.on('end', function(chunk)
+  {
+    // console.log("show the Kaohsiung router data : "+routerData);
+
+    var router_data = null;
+    try
+    {
+        router_data = JSON.parse(routerData);
+    }
+    catch (e)
+    {
+        console.log("show the Kaohsiung router data : "+routerData);
+        console.log("router data parse error : "+e);
+        return;
+    }
+
+   
+    if (router_data.length == 10)
+    {
+        router_list_Kaohsiung_Index++;
+        // console.log("router_list_Kaohsiung_Index : "+router_list_Kaohsiung_Index);
+        var router_list_Kaohsiung_Options = {
+                host:'ptx.transportdata.tw',
+                path: '/MOTC/v2/Bus/Route/City/Kaohsiung/?ticket='+ptxTicket+'&%24top=10&%24skip='+(router_list_Kaohsiung_Index * 10)+'&%24format=JSON'
+            };
+
+        http.get(router_list_Kaohsiung_Options, KaohsiungRouterGet_callback).end();
+    }
+    else
+    {
+        router_list_Kaohsiung_Index = 0;
+    }
+    
+    for (var i=0;i<router_data.length;i++)
+    {
+      if (router_data[i].RouteUID !== "")
+      {
+          var routeid = router_data[i].RouteUID;
+          router_data[i].Location = 'Kaohsiung';
+          routerList.findOneAndUpdate({RouteUID: routeid}, router_data[i], 
+          {"new": true, "upsert":true, "returnNewDocument":true, "passRawResult": true}, 
+          function (err, results, raw) {
+            if (err)
+            {
+                console.log("bus db find data error : "+err);
+            }
+              
+            /*if (raw.lastErrorObject.updatedExisting)
+            {
+              console.log('trace Kaohsiung Router = ', results.RouteUID, 'updated');
+            }
+            else
+            {
+              console.log('trace Kaohsiung Router = ', results.RouteUID, 'added');
+            }*/
+      });
+      }
+    }
+  });
+}
+
+// new cronJob('00 */30 1,2,3,4,5 * * *', function ()
+/*{
+    router_list_Kaohsiung_Index = 0;
+    var router_list_Kaohsiung_Options = {
+        host:'ptx.transportdata.tw',
+        path: '/MOTC/v2/Bus/Route/City/Kaohsiung/?ticket='+ptxTicket+'&%24top=10&%24skip='+(router_list_Kaohsiung_Index * 10)+'&%24format=JSON'
+    };
+
+    http.get(router_list_Kaohsiung_Options, KaohsiungRouterGet_callback).end();
+    
+}, null, true, "Asia/Taipei");*/
+
+
+//ptx update Kaohsiung route stop station database
+function KaohsiungRouterStopGet_callback(response)
+{ 
+  var routerData = '';
+  
+  response.on('error', function (e) {
+      console.log("Kaohsiung RouterStop problem with request: ", e);
+  });
+  
+  response.on('data', function(chunk) {
+      routerData += chunk;
+  });
+  
+  response.on('end', function(chunk)
+  {
+    // console.log("show the Kaohsiung router stop data : "+routerData);
+    
+    var router_data = null;
+    try
+    {
+        router_data = JSON.parse(routerData);
+    }
+    catch (e)
+    {
+        console.log("show the Kaohsiung router stop data : "+routerData);
+        console.log("router stop data parse error : "+e);
+        return;
+    }
+    
+    if (router_data.length == 10)
+    {
+        router_stop_Kaohsiung_Index++;
+        // console.log("router_stop_Kaohsiung_Index : "+router_stop_Kaohsiung_Index);
+        var router_stop_Kaohsiung_Options = {
+                host:'ptx.transportdata.tw',
+                path: '/MOTC/v2/Bus/StopOfRoute/City/Kaohsiung/?ticket='+ptxTicket+'&%24top=10&%24skip='+(router_stop_Kaohsiung_Index * 10)+'&%24format=JSON'
+            };
+
+        http.get(router_stop_Kaohsiung_Options, KaohsiungRouterStopGet_callback).end();
+    }
+    else
+    {
+        router_stop_Kaohsiung_Index = 0;
+    }
+    
+    for (var i=0;i<router_data.length;i++)
+    {
+      if (router_data[i].RouteUID !== "")
+      {
+          var routeid = router_data[i].RouteUID;
+          var direction = router_data[i].Direction;
+          router_data[i].Location = 'Kaohsiung';
+          //console.log('show the stops data = '+router_data[i]);
+          //console.log('show the stops number = '+router_data[i].Stops.length);
+          routerStopList.findOneAndUpdate({RouteUID: routeid, Direction: direction}, router_data[i], 
+          {"new": true, "upsert":true, "returnNewDocument":true, "passRawResult": true}, 
+          function (err, results, raw) {
+            if (err)
+            {
+                console.log("bus db find data error : "+err);
+            }
+              
+            /*if (raw.lastErrorObject.updatedExisting)
+            {
+              console.log('trace Kaohsiung RouterStop = ', results.RouteUID, 'updated');
+            }
+            else
+            {
+              console.log('trace Kaohsiung RouterStop = ', results.RouteUID, 'added');
+            }*/
+      });
+      }
+    }
+  });
+}
+
+// new cronJob('30 */30 1,2,3,4,5 * * *', function ()
+/*{
+    router_stop_Kaohsiung_Index = 0;
+    var router_stop_Kaohsiung_Options = {
+        host:'ptx.transportdata.tw',
+        path: '/MOTC/v2/Bus/StopOfRoute/City/Kaohsiung/?ticket='+ptxTicket+'&%24top=10&%24skip='+(router_stop_Kaohsiung_Index * 10)+'&%24format=JSON'
+    };
+
+    http.get(router_stop_Kaohsiung_Options, KaohsiungRouterStopGet_callback).end();
+    
+}, null, true, "Asia/Taipei");*/
+
+
+//ptx update Kaohsiung N1 API database
+function KaohsiungN1APIGet_callback(response)
+{ 
+  var routerData = '';
+  
+  response.on('error', function (e) {
+      console.log("KaohsiungN1 problem with request: ", e);
+  });
+  
+  response.on('data', function(chunk) {
+      routerData += chunk;
+  });
+  
+  response.on('end', function(chunk)
+  {
+    //console.log("show the Kaohsiung N1 API data : "+routerData);
+    var router_data = null;
+    try
+    {
+        router_data = JSON.parse(routerData);
+    }
+    catch (e)
+    {
+        console.log("show the Kaohsiung N1 API data : "+routerData);
+        console.log("error message : "+e);
+        return;
+    }
+    
+    
+    for (var i=0;i<router_data.length;i++)
+    {
+      if (router_data[i].StopUID !== "")
+      {
+          var stopuid = router_data[i].StopUID;
+          var routeuid = router_data[i].RouteUID;
+          
+          if (router_data[i].EstimateTime == undefined)
+          {
+              router_data[i].EstimateTime = -1;
+          }
+          
+          if (router_data[i].StopStatus == undefined)
+          {
+              router_data[i].StopStatus = 0;
+          }
+          
+          busEstimateTime.findOneAndUpdate({StopUID: stopuid, RouteUID: routeuid}, router_data[i], 
+          {"new": true, "upsert":true, "returnNewDocument":true, "passRawResult": true}, 
+          function (err, results, raw) {
+            if (err)
+            {
+                console.log("Kaohsiung N1API db find data error : "+err);
+            }
+              
+            /*if (raw.lastErrorObject.updatedExisting)
+            {
+              console.log('trace Kaohsiung N1API = ', results.StopUID, 'updated');
+            }
+            else
+            {
+              console.log('trace Kaohsiung N1API = ', results.StopUID, 'added');
+            }*/
+          });
+      }
+    }
+  });
+}
+
+// new cronJob('05 */01 * * * *', function ()
+/*{
+    cityRouteEstimateTimeList.find({Location:'Kaohsiung'},
+    function (err, docs) {
+        if (err)
+        {
+            console.log("stop id find data error : "+err);
+        }
+          
+        Kaohsiung_total_Favor = docs.length;
+        // console.log('Kaohsiung_total_Favor length = ', Kaohsiung_total_Favor);
+        
+        if (docs.length < 10)
+        {
+            for (var i=0;i<docs.length;i++)
+            {
+                // console.log('docs '+ i +' = ', docs[i].RouteUID);
+                
+                if ((docs[i].RouteUID != null) && (docs[i].likeNumber > 0))
+                {
+                    var bus_Estimate_Time_Kaohsiung_Options = {
+                            host:'ptx.transportdata.tw',
+                            path: '/MOTC/v2/Bus/EstimatedTimeOfArrival/City/Kaohsiung?ticket='+ptxTicket+'&%24filter=RouteUID%20eq%20\u0027'+docs[i].RouteUID+'\u0027&%24format=JSON'
+                        };
+                    http.get(bus_Estimate_Time_Kaohsiung_Options, KaohsiungN1APIGet_callback).end();
+                }
+            }
+        }
+        else
+        {
+            var searchIndex = bus_Estimate_Time_Kaohsiung_Index * 10;
+            for (var i=searchIndex;i<(searchIndex+10);i++)
+            {
+                // console.log('docs '+ i +' = ', docs[i].RouteUID);
+                
+                if ((docs[i].RouteUID != null) && (docs[i].likeNumber > 0))
+                {
+                    var bus_Estimate_Time_Kaohsiung_Options = {
+                            host:'ptx.transportdata.tw',
+                            path: '/MOTC/v2/Bus/EstimatedTimeOfArrival/City/Kaohsiung?ticket='+ptxTicket+'&%24filter=RouteUID%20eq%20\u0027'+docs[i].RouteUID+'\u0027&%24format=JSON'
+                        };
+                    http.get(bus_Estimate_Time_Kaohsiung_Options, KaohsiungN1APIGet_callback).end();
+                }
+            }
+            bus_Estimate_Time_Kaohsiung_Index++;
+            setTimeout(updateKaohsiungBusEstimateTime, 1000, docs);
+        }
+    });
+    
+}, null, true, "Asia/Taipei");*/
+
+function updateKaohsiungBusEstimateTime(docs)
+{
+    var searchIndex = bus_Estimate_Time_Kaohsiung_Index * 10;
+    var endIndex = searchIndex + 10;
+    if (endIndex > Kaohsiung_total_Favor)
+    {
+        endIndex = Kaohsiung_total_Favor;
+    }
+    
+    for (var i=searchIndex;i<endIndex;i++)
+    {
+        // console.log('docs '+ i +' = ', docs[i].RouteUID);
+
+        if ((docs[i].RouteUID != null) && (docs[i].likeNumber > 0))
+        {
+            var bus_Estimate_Time_Kaohsiung_Options = {
+                    host:'ptx.transportdata.tw',
+                    path: '/MOTC/v2/Bus/EstimatedTimeOfArrival/City/Kaohsiung?ticket='+ptxTicket+'&%24filter=RouteUID%20eq%20\u0027'+docs[i].RouteUID+'\u0027&%24format=JSON'
+                };
+            http.get(bus_Estimate_Time_Kaohsiung_Options, KaohsiungN1APIGet_callback).end();
+        }
+    }
+    
+    if (Kaohsiung_total_Favor > endIndex)
+    {
+        bus_Estimate_Time_Kaohsiung_Index++;
+        setTimeout(updateKaohsiungBusEstimateTime, 1000, docs);
+    }
+    else
+    {
+        bus_Estimate_Time_Kaohsiung_Index = 0;
+    }
+}
+
+/*
+ * InterCity bus route and stop information maintain area
+ */
+
+// InterCity route index
+var router_list_InterCity_Index = 0;
+var router_stop_InterCity_Index = 0;
+var bus_Estimate_Time_InterCity_Index = 0;
+var InterCity_total_Favor = 0;
+
+// ptx update InterCity router database
+function InterCityRouterGet_callback(response)
+{ 
+  var routerData = '';
+  
+  response.on('error', function (e) {
+      console.log("InterCity Router problem with request: ", e);
+  });
+  
+  response.on('data', function(chunk) {
+      routerData += chunk;
+  });
+  
+  response.on('end', function(chunk)
+  {
+    // console.log("show the InterCity router data : "+routerData);
+
+    var router_data = null;
+    try
+    {
+        router_data = JSON.parse(routerData);
+    }
+    catch (e)
+    {
+        console.log("show the InterCity router data : "+routerData);
+        console.log("router data parse error : "+e);
+        return;
+    }
+
+   
+    if (router_data.length == 10)
+    {
+        router_list_InterCity_Index++;
+        // console.log("router_list_InterCity_Index : "+router_list_InterCity_Index);
+        var router_list_InterCity_Options = {
+                host:'ptx.transportdata.tw',
+                path: '/MOTC/v2/Bus/Route/InterCity/?ticket='+ptxTicket+'&%24top=10&%24skip='+(router_list_InterCity_Index * 10)+'&%24format=JSON'
+            };
+
+        http.get(router_list_InterCity_Options, InterCityRouterGet_callback).end();
+    }
+    else
+    {
+        router_list_InterCity_Index = 0;
+    }
+    
+    for (var i=0;i<router_data.length;i++)
+    {
+      if (router_data[i].RouteUID !== "")
+      {
+          var routeid = router_data[i].RouteUID;
+          router_data[i].Location = 'InterCity';
+          routerList.findOneAndUpdate({RouteUID: routeid}, router_data[i], 
+          {"new": true, "upsert":true, "returnNewDocument":true, "passRawResult": true}, 
+          function (err, results, raw) {
+            if (err)
+            {
+                console.log("bus db find data error : "+err);
+            }
+              
+            /*if (raw.lastErrorObject.updatedExisting)
+            {
+              console.log('trace InterCity Router = ', results.RouteUID, 'updated');
+            }
+            else
+            {
+              console.log('trace InterCity Router = ', results.RouteUID, 'added');
+            }*/
+      });
+      }
+    }
+  });
+}
+
+// new cronJob('00 */30 1,2,3,4,5 * * *', function ()
+/*{
+    router_list_InterCity_Index = 0;
+    var router_list_InterCity_Options = {
+        host:'ptx.transportdata.tw',
+        path: '/MOTC/v2/Bus/Route/InterCity/?ticket='+ptxTicket+'&%24top=10&%24skip='+(router_list_InterCity_Index * 10)+'&%24format=JSON'
+    };
+
+    http.get(router_list_InterCity_Options, InterCityRouterGet_callback).end();
+    
+}, null, true, "Asia/Taipei");*/
+
+
+//ptx update InterCity route stop station database
+function InterCityRouterStopGet_callback(response)
+{ 
+  var routerData = '';
+  
+  response.on('error', function (e) {
+      console.log("InterCity RouterStop problem with request: ", e);
+  });
+  
+  response.on('data', function(chunk) {
+      routerData += chunk;
+  });
+  
+  response.on('end', function(chunk)
+  {
+    console.log("show the InterCity router stop data : "+routerData);
+    
+    var router_data = null;
+    try
+    {
+        router_data = JSON.parse(routerData);
+    }
+    catch (e)
+    {
+        console.log("show the InterCity router stop data : "+routerData);
+        console.log("router stop data parse error : "+e);
+        return;
+    }
+    
+    if (router_data.length == 10)
+    {
+        router_stop_InterCity_Index++;
+        // console.log("router_stop_InterCity_Index : "+router_stop_InterCity_Index);
+        var router_stop_InterCity_Options = {
+                host:'ptx.transportdata.tw',
+                path: '/MOTC/v2/Bus/StopOfRoute/InterCity/?ticket='+ptxTicket+'&%24top=10&%24skip='+(router_stop_InterCity_Index * 10)+'&%24format=JSON'
+            };
+
+        http.get(router_stop_InterCity_Options, InterCityRouterStopGet_callback).end();
+    }
+    else
+    {
+        router_stop_InterCity_Index = 0;
+    }
+    
+    for (var i=0;i<router_data.length;i++)
+    {
+      if (router_data[i].RouteUID !== "")
+      {
+          var routeid = router_data[i].RouteUID;
+          var direction = router_data[i].Direction;
+          router_data[i].Location = 'InterCity';
+          //console.log('show the stops data = '+router_data[i]);
+          //console.log('show the stops number = '+router_data[i].Stops.length);
+          routerStopList.findOneAndUpdate({RouteUID: routeid, Direction: direction}, router_data[i], 
+          {"new": true, "upsert":true, "returnNewDocument":true, "passRawResult": true}, 
+          function (err, results, raw) {
+            if (err)
+            {
+                console.log("bus db find data error : "+err);
+            }
+              
+            /*if (raw.lastErrorObject.updatedExisting)
+            {
+              console.log('trace InterCity RouterStop = ', results.RouteUID, 'updated');
+            }
+            else
+            {
+              console.log('trace InterCity RouterStop = ', results.RouteUID, 'added');
+            }*/
+      });
+      }
+    }
+  });
+}
+
+// new cronJob('30 */30 1,2,3,4,5 * * *', function ()
+/*{
+    router_stop_InterCity_Index = 0;
+    var router_stop_InterCity_Options = {
+        host:'ptx.transportdata.tw',
+        path: '/MOTC/v2/Bus/StopOfRoute/InterCity/?ticket='+ptxTicket+'&%24top=10&%24skip='+(router_stop_InterCity_Index * 10)+'&%24format=JSON'
+    };
+
+    http.get(router_stop_InterCity_Options, InterCityRouterStopGet_callback).end();
+    
+}, null, true, "Asia/Taipei");*/
+
+
+//ptx update InterCity N1 API database
+function InterCityN1APIGet_callback(response)
+{ 
+  var routerData = '';
+  
+  response.on('error', function (e) {
+      console.log("InterCityN1 problem with request: ", e);
+  });
+  
+  response.on('data', function(chunk) {
+      routerData += chunk;
+  });
+  
+  response.on('end', function(chunk)
+  {
+    //console.log("show the InterCity N1 API data : "+routerData);
+    var router_data = null;
+    try
+    {
+        router_data = JSON.parse(routerData);
+    }
+    catch (e)
+    {
+        console.log("show the InterCity N1 API data : "+routerData);
+        console.log("error message : "+e);
+        return;
+    }
+    
+    
+    for (var i=0;i<router_data.length;i++)
+    {
+      if (router_data[i].StopUID !== "")
+      {
+          var stopuid = router_data[i].StopUID;
+          var routeuid = router_data[i].RouteUID;
+          
+          if (router_data[i].EstimateTime == undefined)
+          {
+              router_data[i].EstimateTime = -1;
+          }
+          
+          if (router_data[i].StopStatus == undefined)
+          {
+              router_data[i].StopStatus = 0;
+          }
+          
+          busEstimateTime.findOneAndUpdate({StopUID: stopuid, RouteUID: routeuid}, router_data[i], 
+          {"new": true, "upsert":true, "returnNewDocument":true, "passRawResult": true}, 
+          function (err, results, raw) {
+            if (err)
+            {
+                console.log("InterCity N1API db find data error : "+err);
+            }
+              
+            /*if (raw.lastErrorObject.updatedExisting)
+            {
+              console.log('trace InterCity N1API = ', results.StopUID, 'updated');
+            }
+            else
+            {
+              console.log('trace InterCity N1API = ', results.StopUID, 'added');
+            }*/
+          });
+      }
+    }
+  });
+}
+
+// new cronJob('40 */01 * * * *', function ()
+/*{
+    cityRouteEstimateTimeList.find({Location:'InterCity'},
+    function (err, docs) {
+        if (err)
+        {
+            console.log("stop id find data error : "+err);
+        }
+          
+        InterCity_total_Favor = docs.length;
+        // console.log('InterCity_total_Favor length = ', InterCity_total_Favor);
+        
+        if (docs.length < 10)
+        {
+            for (var i=0;i<docs.length;i++)
+            {
+                // console.log('docs '+ i +' = ', docs[i].RouteUID);
+                
+                if ((docs[i].RouteUID != null) && (docs[i].likeNumber > 0))
+                {
+                    var bus_Estimate_Time_InterCity_Options = {
+                            host:'ptx.transportdata.tw',
+                            path: '/MOTC/v2/Bus/EstimatedTimeOfArrival/InterCity?ticket='+ptxTicket+'&%24filter=RouteUID%20eq%20\u0027'+docs[i].RouteUID+'\u0027&%24format=JSON'
+                        };
+                    http.get(bus_Estimate_Time_InterCity_Options, InterCityN1APIGet_callback).end();
+                }
+            }
+        }
+        else
+        {
+            var searchIndex = bus_Estimate_Time_InterCity_Index * 10;
+            for (var i=searchIndex;i<(searchIndex+10);i++)
+            {
+                // console.log('docs '+ i +' = ', docs[i].RouteUID);
+                
+                if ((docs[i].RouteUID != null) && (docs[i].likeNumber > 0))
+                {
+                    var bus_Estimate_Time_InterCity_Options = {
+                            host:'ptx.transportdata.tw',
+                            path: '/MOTC/v2/Bus/EstimatedTimeOfArrival/InterCity?ticket='+ptxTicket+'&%24filter=RouteUID%20eq%20\u0027'+docs[i].RouteUID+'\u0027&%24format=JSON'
+                        };
+                    http.get(bus_Estimate_Time_InterCity_Options, InterCityN1APIGet_callback).end();
+                }
+            }
+            bus_Estimate_Time_InterCity_Index++;
+            setTimeout(updateInterCityBusEstimateTime, 1000, docs);
+        }
+    });
+    
+}, null, true, "Asia/Taipei");*/
+
+function updateInterCityBusEstimateTime(docs)
+{
+    var searchIndex = bus_Estimate_Time_InterCity_Index * 10;
+    var endIndex = searchIndex + 10;
+    if (endIndex > InterCity_total_Favor)
+    {
+        endIndex = InterCity_total_Favor;
+    }
+    
+    for (var i=searchIndex;i<endIndex;i++)
+    {
+        // console.log('docs '+ i +' = ', docs[i].RouteUID);
+
+        if ((docs[i].RouteUID != null) && (docs[i].likeNumber > 0))
+        {
+            var bus_Estimate_Time_InterCity_Options = {
+                    host:'ptx.transportdata.tw',
+                    path: '/MOTC/v2/Bus/EstimatedTimeOfArrival/InterCity?ticket='+ptxTicket+'&%24filter=RouteUID%20eq%20\u0027'+docs[i].RouteUID+'\u0027&%24format=JSON'
+                };
+            http.get(bus_Estimate_Time_InterCity_Options, InterCityN1APIGet_callback).end();
+        }
+    }
+    
+    if (InterCity_total_Favor > endIndex)
+    {
+        bus_Estimate_Time_InterCity_Index++;
+        setTimeout(updateInterCityBusEstimateTime, 1000, docs);
+    }
+    else
+    {
+        bus_Estimate_Time_InterCity_Index = 0;
+    }
+}

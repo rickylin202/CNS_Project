@@ -1,0 +1,46 @@
+<!DOCTYPE html>
+<html>
+  <head>
+    <title><%= title %></title>
+    <link rel='stylesheet' href='/stylesheets/style.css' />
+    <script type="text/javascript" src='../public/javascripts/jquery-3.2.1.min.js'></script>
+    <script type="text/javascript" src="../public/javascripts/globalConstant.js"></script>
+    <script type="text/javascript" src="../public/javascripts/generic_widgets.js"></script>
+    <script type="text/javascript" src="../public/javascripts/keycodes.js"></script>
+    <script type="text/javascript" src="../public/javascripts/keyPropagationHooker.js"></script>
+    <script type="text/javascript" src="../public/javascripts/utils.js"></script>
+    <script type="text/javascript" src="../public/javascripts/viewingBehaviorLog.js"></script>
+    <script type="text/javascript" src="../public/javascripts/viewingBehaviorLogInternal.js"></script>
+    <script type="text/javascript" src="../public/javascripts/wrapper.js"></script>
+    <script type="text/javascript" src="../public/javascripts/jsonMethod.js"></script>
+    <script>
+        function onLoad()
+        {
+            if(typeof top.window.cns!="undefined")
+            {
+                console.log("busStation search page =============");
+            }
+            else
+            {
+                alert("busStation search page =============");
+            }
+            
+            showTime();
+        }
+        
+        function onunLoad()
+        {
+            //document.removeEventListener("keydown", keyPress, false);
+        }
+    </script>
+  </head>
+  <body onload='onLoad()' onunload='onunLoad()'>
+    <embed type="application/x-motorola-toi" hidden="true"></embed>
+    <embed type="application/x-kreatv-ddman" hidden="true"></embed>
+
+    <div id="titleArea">
+        <span id="title"><%= shopname %></span>
+        <span id="nowDate">aaaaaa</span>
+    </div>
+  </body>
+</html>
